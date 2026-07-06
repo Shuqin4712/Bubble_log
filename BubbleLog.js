@@ -42,7 +42,9 @@ const CONFIG = {
       // 文字色
       primaryLight: "#B4245A", primaryDark: "#FFB7CE",
       secondaryLight: "#8E5A6E", secondaryDark: "#C99BAC",
-      // 热力图：0 条底色 + 4 档加深（1 / 2~3 / 4~6 / 7+），档间对比拉开
+      // 热力图：0 条底色 + 4 档加深。分档边界不是固定条数，
+      // 而是按历史非零日总数的四分位数自适应（见 Stats.heatBoundaries），
+      // 一天几条和一天几十条的爱豆都能拉开层次
       heatBase: "#F3E3E9", heatBaseDark: "#4A3340",
       heatLevels: ["#F5AECB", "#EC74A8", "#D84487", "#A61B5F"],
       heatText: "#B4245A",
@@ -296,6 +298,23 @@ const Store = {
     });
   },
 
+  /**
+   * 直接改写某天的四类条数（记错了用这个改）。
+   * totals 以 days 重算保证一致；手动改写后一键撤销不再适用，清空 lastAction。
+   */
+  async setDayCounts(key, counts) {
+    return await this.mutate((s) => {
+      const clean = {};
+      for (const t of CONFIG.types) {
+        clean[t] = Math.max(0, Math.floor(Number(counts[t]) || 0));
+      }
+      if (CONFIG.types.every((t) => clean[t] === 0)) delete s.days[key];
+      else s.days[key] = clean;
+      this.rebuildTotals(s);
+      s.lastAction = null;
+    });
+  },
+
   /** 首次运行初始化引导：Alert 依次询问昵称与订阅起始日 */
   async initWizard() {
     // 第一步：昵称
@@ -413,6 +432,21 @@ const Stats = {
     return sum;
   },
 
+  /**
+   * 热力图自适应分档边界：取全部非零日总数的四分位数 [q25, q50, q75]。
+   * 判档用 count < 边界（见 HeatmapPainter.levelIndex），
+   * 数据不足 4 天时退回固定档 [2, 4, 7]（即 1 / 2~3 / 4~6 / 7+）。
+   */
+  heatBoundaries(state) {
+    const values = Object.keys(state.days)
+      .map((k) => this.dayTotal(state.days[k]))
+      .filter((v) => v > 0)
+      .sort((a, b) => a - b);
+    if (values.length < 4) return [2, 4, 7];
+    const q = (p) => values[Math.min(values.length - 1, Math.floor(values.length * p))];
+    return [q(0.25), q(0.5), q(0.75)];
+  },
+
   /** 开通订阅至今的日均条数（1 位小数） */
   dayAvg(state) {
     const days = Math.max(1, this.dPlus(state));
@@ -434,14 +468,38 @@ const Stats = {
 // ============================================================
 
 const HeatmapPainter = {
-  /** 条数 → 色阶（0 = 底色空格；1 / 2~3 / 4~6 / 7+ 逐档加深） */
-  levelColor(count, dark) {
+  /** 条数 → 档位序号：-1 = 空格（0 条），0~3 逐档加深。bounds 见 Stats.heatBoundaries */
+  levelIndex(count, bounds) {
+    if (count <= 0) return -1;
+    bounds = bounds || [2, 4, 7];
+    if (count < bounds[0]) return 0;
+    if (count < bounds[1]) return 1;
+    if (count < bounds[2]) return 2;
+    return 3;
+  },
+
+  /** 条数 → 色阶颜色 */
+  levelColor(count, dark, bounds) {
     const t = theme();
-    if (count <= 0) return new Color(dark ? t.heatBaseDark : t.heatBase);
-    if (count === 1) return new Color(t.heatLevels[0]);
-    if (count <= 3) return new Color(t.heatLevels[1]);
-    if (count <= 6) return new Color(t.heatLevels[2]);
-    return new Color(t.heatLevels[3]);
+    const i = this.levelIndex(count, bounds);
+    return i < 0
+      ? new Color(dark ? t.heatBaseDark : t.heatBase)
+      : new Color(t.heatLevels[i]);
+  },
+
+  /** 近 N 天网格的像素尺寸（组件里设置 imageSize 用，避免图片被拉伸铺满） */
+  gridMetrics(opts) {
+    opts = opts || {};
+    const days = opts.days || 30;
+    const cols = opts.cols || 6;
+    const rows = Math.ceil(days / cols);
+    const cell = opts.cell || 26;
+    const gap = opts.gap || 6;
+    return {
+      days, cols, rows, cell, gap,
+      w: cols * cell + (cols - 1) * gap,
+      h: rows * cell + (rows - 1) * gap,
+    };
   },
 
   /**
@@ -455,42 +513,37 @@ const HeatmapPainter = {
     opts = opts || {};
     const dark = !!opts.dark;
     const t = theme();
-    const days = opts.days || 30;
-    const cols = opts.cols || 6;
-    const rows = Math.ceil(days / cols);
-    const cell = opts.cell || 26;
-    const gap = opts.gap || 6;
-    const corner = Math.round(cell * 0.28);
-    const w = cols * cell + (cols - 1) * gap;
-    const h = rows * cell + (rows - 1) * gap;
+    const m = this.gridMetrics(opts);
+    const corner = Math.round(m.cell * 0.28);
+    const bounds = Stats.heatBoundaries(state);
 
     const ctx = new DrawContext();
-    ctx.size = new Size(w, h);
+    ctx.size = new Size(m.w, m.h);
     ctx.opaque = false;
     ctx.respectScreenScale = true;
 
     const today = keyToDate(todayKey());
-    for (let i = 0; i < days; i++) {
+    for (let i = 0; i < m.days; i++) {
       // 用 (年,月,日-偏移) 构造，避免跨夏令时按毫秒加减出现日期偏移
       const d = new Date(
-        today.getFullYear(), today.getMonth(), today.getDate() - (days - 1 - i)
+        today.getFullYear(), today.getMonth(), today.getDate() - (m.days - 1 - i)
       );
       const count = Stats.dayTotal(Stats.dayCounts(state, dateKey(d)));
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const x = col * (cell + gap);
-      const y = row * (cell + gap);
+      const col = i % m.cols;
+      const row = Math.floor(i / m.cols);
+      const x = col * (m.cell + m.gap);
+      const y = row * (m.cell + m.gap);
 
       const path = new Path();
-      path.addRoundedRect(new Rect(x, y, cell, cell), corner, corner);
+      path.addRoundedRect(new Rect(x, y, m.cell, m.cell), corner, corner);
       ctx.addPath(path);
-      ctx.setFillColor(this.levelColor(count, dark));
+      ctx.setFillColor(this.levelColor(count, dark, bounds));
       ctx.fillPath();
 
-      if (i === days - 1) { // 今天
+      if (i === m.days - 1) { // 今天
         const ring = new Path();
         ring.addRoundedRect(
-          new Rect(x + 1, y + 1, cell - 2, cell - 2), corner - 1, corner - 1
+          new Rect(x + 1, y + 1, m.cell - 2, m.cell - 2), corner - 1, corner - 1
         );
         ctx.addPath(ring);
         ctx.setStrokeColor(new Color(dark ? t.heatTodayDark : t.heatToday));
@@ -549,6 +602,7 @@ const HeatmapPainter = {
 
     // 日期格子
     const tKey = todayKey();
+    const bounds = Stats.heatBoundaries(state);
     const dayFont = Math.round(cell * 0.37);
     const corner = Math.round(cell * 0.23);
     ctx.setFont(Font.mediumSystemFont(dayFont));
@@ -561,11 +615,12 @@ const HeatmapPainter = {
       const rect = new Rect(x, y, cell, cell);
       const key = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       const count = Stats.dayTotal(Stats.dayCounts(state, key));
+      const level = this.levelIndex(count, bounds);
 
       const path = new Path();
       path.addRoundedRect(rect, corner, corner);
       ctx.addPath(path);
-      ctx.setFillColor(this.levelColor(count, dark));
+      ctx.setFillColor(this.levelColor(count, dark, bounds));
       ctx.fillPath();
 
       // 今天加描边高亮
@@ -578,9 +633,9 @@ const HeatmapPainter = {
         ctx.strokePath();
       }
 
-      // 日期数字：深色格用白字；有记录的浅粉格固定深字保证对比度；空格随模式
-      if (count >= 4) ctx.setTextColor(Color.white());
-      else if (count >= 1) ctx.setTextColor(new Color(t.secondaryLight));
+      // 日期数字：深色档用白字；浅粉档固定深字保证对比度；空格随模式
+      if (level >= 2) ctx.setTextColor(Color.white());
+      else if (level >= 0) ctx.setTextColor(new Color(t.secondaryLight));
       else ctx.setTextColor(labelColor);
       const textH = dayFont + 3;
       ctx.drawTextInRect(String(day), new Rect(x, y + (cell - textH) / 2, cell, textH));
@@ -671,7 +726,7 @@ const WidgetView = {
     return widget;
   },
 
-  /** medium：左侧 D+与昵称；右侧 2x2 今日四类计数；底部累计总数 */
+  /** medium：左侧昵称 + D+ + 今日条数；右侧近 30 天迷你热力格；底部统计 */
   buildMedium(state) {
     const widget = new ListWidget();
     this._applyBackground(widget);
@@ -699,47 +754,36 @@ const WidgetView = {
     dText.minimumScaleFactor = 0.5;
     dText.lineLimit = 1;
 
-    body.addSpacer();
-
-    // 右列：今日 2x2 网格 或 0 条文案
-    const right = body.addStack();
-    right.layoutVertically();
+    left.addSpacer(4);
 
     const today = Stats.todayCounts(state);
-    if (Stats.dayTotal(today) === 0) {
-      right.addSpacer();
-      const empty = right.addText("今天还没有泡泡 🫧");
-      empty.font = Font.mediumSystemFont(14);
-      empty.textColor = this._secondary();
-      right.addSpacer();
-    } else {
-      const grid = [
-        ["text", "voice"],
-        ["image", "emoji"],
-      ];
-      for (let r = 0; r < grid.length; r++) {
-        const rowStack = right.addStack();
-        rowStack.layoutHorizontally();
-        for (const type of grid[r]) {
-          const meta = CONFIG.typeMeta[type];
-          const cellStack = rowStack.addStack();
-          cellStack.layoutHorizontally();
-          cellStack.centerAlignContent();
-          cellStack.size = new Size(72, 30);
-          const txt = cellStack.addText(`${meta.emoji} ${today[type]}`);
-          txt.font = Font.semiboldSystemFont(16);
-          txt.textColor = this._primary();
-          txt.lineLimit = 1;
-        }
-        if (r < grid.length - 1) rowStack.spacing = 6;
-      }
-    }
+    const todayText = left.addText(
+      Stats.dayTotal(today) === 0
+        ? "今天还没有泡泡 🫧"
+        : `今日 ${Stats.dayTotal(today)} 条`
+    );
+    todayText.font = Font.mediumSystemFont(12);
+    todayText.textColor = this._secondary();
+    todayText.lineLimit = 1;
+
+    body.addSpacer();
+
+    // 右列：近 30 天迷你热力格
+    const gridOpts = { days: 30, cols: 6, cell: 15, gap: 4 };
+    const m = HeatmapPainter.gridMetrics(gridOpts);
+    const img = HeatmapPainter.paintRecentGrid(state, {
+      ...gridOpts,
+      dark: Device.isUsingDarkAppearance(),
+    });
+    const imgEl = body.addImage(img);
+    imgEl.imageSize = new Size(m.w, m.h); // 按原尺寸显示，不让系统拉伸铺满
+    imgEl.centerAlignImage();
 
     widget.addSpacer(8);
 
-    // 底部：累计总数
+    // 底部：近 30 天 / 累计
     const footer = widget.addText(
-      `累计 ${Stats.grandTotal(state)} 条 · 日均 ${Stats.dayAvg(state)} 条`
+      `近30天 ${Stats.recentTotal(state, 30)} 条 · 累计 ${Stats.grandTotal(state)} 条`
     );
     footer.font = Font.mediumSystemFont(11);
     footer.textColor = this._secondary();
@@ -748,7 +792,7 @@ const WidgetView = {
     return widget;
   },
 
-  /** large：顶部昵称 + D+ 与今日计数，中间当月热力图，底部月度/累计 */
+  /** large：顶部昵称 + D+ 与今日计数，中间近 30 天热力格，底部统计 */
   buildLarge(state) {
     const widget = new ListWidget();
     this._applyBackground(widget);
@@ -788,12 +832,17 @@ const WidgetView = {
 
     widget.addSpacer(6);
 
+    widget.addSpacer();
+
     // 近 30 天热力格（GitHub 风格，无日期数字；静态位图，按当前深浅色取色）
+    const gridOpts = { days: 30, cols: 10, cell: 21, gap: 5 };
+    const m = HeatmapPainter.gridMetrics(gridOpts);
     const img = HeatmapPainter.paintRecentGrid(state, {
+      ...gridOpts,
       dark: Device.isUsingDarkAppearance(),
-      days: 30, cols: 6, cell: 32, gap: 8,
     });
     const imgEl = widget.addImage(img);
+    imgEl.imageSize = new Size(m.w, m.h); // 按原尺寸显示，不让系统拉伸铺满
     imgEl.centerAlignImage();
 
     widget.addSpacer();
@@ -918,6 +967,27 @@ const PanelView = {
       }
       table.addRow(undoRow);
 
+      // ---- 直接修改这天的条数（记错了在这里改） ----
+      const editRow = new UITableRow();
+      editRow.height = 48;
+      editRow.dismissOnSelect = false;
+      const editCell = editRow.addText(
+        "✏️  修改这天的条数",
+        `记错了？直接改写 ${isToday ? "今天" : targetDate} 每类的总数`
+      );
+      editCell.titleFont = Font.mediumSystemFont(16);
+      editCell.subtitleFont = Font.systemFont(12);
+      editCell.subtitleColor = secondary;
+      editRow.onSelect = async () => {
+        const counts = await this._askEditCounts(state, targetDate);
+        if (counts) {
+          state = await Store.setDayCounts(targetDate, counts);
+          feedback = null;
+          render();
+        }
+      };
+      table.addRow(editRow);
+
       // ---- 补记入口（仅主面板显示，避免套娃） ----
       if (isToday) {
         const backfillRow = new UITableRow();
@@ -1004,6 +1074,39 @@ const PanelView = {
 
     render();
     await table.present(false);
+  },
+
+  /**
+   * 弹出四个输入框（预填当前值），直接改写某天每类的总条数。
+   * 返回 { text, voice, image, emoji } 或 null（取消）。
+   */
+  async _askEditCounts(state, key) {
+    const cur = Stats.dayCounts(state, key);
+    while (true) {
+      const a = new Alert();
+      a.title = `修改 ${key}`;
+      a.message = "填入这天每类消息的总条数（不是增量）";
+      for (const tp of CONFIG.types) {
+        const meta = CONFIG.typeMeta[tp];
+        a.addTextField(`${meta.emoji} ${meta.label}`, String(cur[tp]));
+      }
+      a.addAction("保存");
+      a.addCancelAction("取消");
+      if ((await a.presentAlert()) === -1) return null;
+      const counts = {};
+      let ok = true;
+      CONFIG.types.forEach((tp, i) => {
+        const v = a.textFieldValue(i).trim();
+        if (!/^\d+$/.test(v)) ok = false;
+        counts[tp] = Number(v);
+      });
+      if (ok) return counts;
+      const err = new Alert();
+      err.title = "数字格式不对";
+      err.message = "每一项都要填 0 或正整数。";
+      err.addAction("重新输入");
+      await err.presentAlert();
+    }
   },
 
   /** 弹出补记日期输入，返回合法 dateKey 或 null（取消） */

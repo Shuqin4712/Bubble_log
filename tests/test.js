@@ -62,9 +62,9 @@ const source = fs
 
 const loadModule = new Function(
   source +
-    "\n;return { CONFIG, Store, Stats, dateKey, todayKey, isValidDateKey, keyToDate, daysBetween };"
+    "\n;return { CONFIG, Store, Stats, HeatmapPainter, dateKey, todayKey, isValidDateKey, keyToDate, daysBetween };"
 );
-const { CONFIG, Store, Stats, dateKey, todayKey, isValidDateKey, keyToDate, daysBetween } =
+const { CONFIG, Store, Stats, HeatmapPainter, dateKey, todayKey, isValidDateKey, keyToDate, daysBetween } =
   loadModule();
 
 // ---------- 断言工具 ----------
@@ -168,6 +168,40 @@ function assertEq(actual, expected, msg) {
   };
   assertEq(Stats.dPlus(s100), 100, "整百天 D+ 计算");
   assert(Stats.isAnniversary(s100), "D+100 判定为纪念日");
+
+  console.log("== 热力图自适应分档 ==");
+  const s3 = {
+    config: { idolName: "OO", startDate: "2026-01-01", theme: "pink" },
+    days: {}, totals: { text: 0, voice: 0, image: 0, emoji: 0 }, lastAction: null,
+  };
+  s3.days["2026-06-01"] = { text: 5, voice: 0, image: 0, emoji: 0 };
+  assertEq(Stats.heatBoundaries(s3), [2, 4, 7], "非零天数不足 4 时退回固定档");
+  // 八天：10/20/30/40/50/60/70/80 → 四分位 [30, 50, 70]
+  [10, 20, 30, 40, 50, 60, 70, 80].forEach((n, i) => {
+    s3.days[`2026-06-${String(i + 2).padStart(2, "0")}`] = { text: n, voice: 0, image: 0, emoji: 0 };
+  });
+  delete s3.days["2026-06-01"];
+  s3.days["2026-06-01"] = { text: 25, voice: 0, image: 0, emoji: 0 }; // 凑 9 天，边界不变段
+  const bounds = Stats.heatBoundaries(s3);
+  assert(bounds[0] < bounds[1] && bounds[1] < bounds[2], "几十条量级下边界拉开层次");
+  assertEq(HeatmapPainter.levelIndex(0, bounds), -1, "0 条 = 空格");
+  assertEq(HeatmapPainter.levelIndex(10, bounds), 0, "低于 q25 为最浅档");
+  assertEq(HeatmapPainter.levelIndex(80, bounds), 3, "高于 q75 为最深档");
+  assert(
+    HeatmapPainter.levelIndex(10, bounds) < HeatmapPainter.levelIndex(45, bounds) &&
+    HeatmapPainter.levelIndex(45, bounds) < HeatmapPainter.levelIndex(80, bounds),
+    "条数越多档位越深（不再全是同色）"
+  );
+
+  console.log("== 直接修改某天条数 ==");
+  await Store.record("text"); // 制造 lastAction
+  let edited = await Store.setDayCounts(tKey, { text: 5, voice: 2, image: 1, emoji: 0 });
+  assertEq(edited.days[tKey], { text: 5, voice: 2, image: 1, emoji: 0 }, "改写为指定条数（非增量）");
+  assertEq(Stats.grandTotal(edited), 8, "改写后 totals 以 days 重算");
+  assert(edited.lastAction === null, "手动改写后清空 lastAction");
+  edited = await Store.setDayCounts(tKey, { text: 0, voice: 0, image: 0, emoji: 0 });
+  assert(!(tKey in edited.days), "全部清零后从 days 中移除");
+  assertEq(Stats.grandTotal(edited), 0, "清零后累计归零");
 
   console.log("== 备份与损坏恢复 ==");
   // 上面多次 save 已产生备份；现在写坏主文件

@@ -33,25 +33,46 @@ const CONFIG = {
     emoji: { emoji: "😝", label: "表情" },
   },
 
-  // 主题（v1 只有 pink，留 key 便于换色）
+  // 主题色板。切换主题存在 state.config.theme，面板里「🎨 切换主题」可改。
+  // 每个色板字段：bg* 组件渐变背景（浅/深色模式）；primary/secondary 文字色；
+  // heat* 热力图（0 条底色 + 4 档加深）。热力图分档边界不是固定条数，
+  // 而是按历史非零日总数的四分位数自适应（见 Stats.heatBoundaries）。
   theme: {
     pink: {
-      // 组件渐变背景（浅色 / 深色模式）
+      label: "🌸 粉",
       bgTopLight: "#FFE3EC", bgBottomLight: "#FFC2D6",
       bgTopDark:  "#3A2230", bgBottomDark:  "#241521",
-      // 文字色
       primaryLight: "#B4245A", primaryDark: "#FFB7CE",
       secondaryLight: "#8E5A6E", secondaryDark: "#C99BAC",
-      // 热力图：0 条底色 + 4 档加深。分档边界不是固定条数，
-      // 而是按历史非零日总数的四分位数自适应（见 Stats.heatBoundaries），
-      // 一天几条和一天几十条的爱豆都能拉开层次
       heatBase: "#F3E3E9", heatBaseDark: "#4A3340",
       heatLevels: ["#F5AECB", "#EC74A8", "#D84487", "#A61B5F"],
       heatText: "#B4245A",
       heatToday: "#9C1D4E", heatTodayDark: "#FFB7CE",
     },
+    gray: {
+      label: "🩶 灰",
+      bgTopLight: "#EEEEF2", bgBottomLight: "#D9D9E0",
+      bgTopDark:  "#2C2C31", bgBottomDark:  "#1B1B1F",
+      primaryLight: "#45454F", primaryDark: "#DCDCE4",
+      secondaryLight: "#7A7A85", secondaryDark: "#A2A2AE",
+      heatBase: "#E4E4E9", heatBaseDark: "#3C3C44",
+      heatLevels: ["#C6C6D0", "#A2A2B0", "#7B7B8C", "#52525F"],
+      heatText: "#45454F",
+      heatToday: "#33333C", heatTodayDark: "#DCDCE4",
+    },
+    blue: {
+      label: "🩵 蓝",
+      bgTopLight: "#DFECFA", bgBottomLight: "#C2DBF5",
+      bgTopDark:  "#1E2A3C", bgBottomDark:  "#131B2A",
+      primaryLight: "#1F5FA8", primaryDark: "#A8CBF0",
+      secondaryLight: "#5E7B9B", secondaryDark: "#8FA9C6",
+      heatBase: "#E2EAF3", heatBaseDark: "#33404F",
+      heatLevels: ["#A8CBEC", "#6FA6DE", "#3D7EC4", "#1E5693"],
+      heatText: "#1F5FA8",
+      heatToday: "#123E6E", heatTodayDark: "#A8CBF0",
+    },
   },
-  themeName: "pink",
+  themeName: "pink", // 运行时会被 state.config.theme 覆盖
 };
 
 function theme() {
@@ -296,6 +317,44 @@ const Store = {
       }
       s.lastAction = null;
     });
+  },
+
+  avatarPath() {
+    return this.fm().joinPath(this.dirPath(), "avatar.png");
+  },
+
+  hasAvatar() {
+    return this.fm().fileExists(this.avatarPath());
+  },
+
+  async loadAvatar() {
+    const fm = this.fm();
+    const p = this.avatarPath();
+    if (!fm.fileExists(p)) return null;
+    if (this._usingiCloud) {
+      try { await fm.downloadFileFromiCloud(p); } catch (e) {}
+    }
+    try { return fm.readImage(p); } catch (e) { return null; }
+  },
+
+  /** 保存头像：居中裁成正方形并缩到 256px，控制组件内存占用 */
+  saveAvatar(img) {
+    this.ensureDir();
+    const side = 256;
+    const scale = Math.max(side / img.size.width, side / img.size.height);
+    const w = img.size.width * scale;
+    const h = img.size.height * scale;
+    const ctx = new DrawContext();
+    ctx.size = new Size(side, side);
+    ctx.opaque = false;
+    ctx.respectScreenScale = false;
+    ctx.drawImageInRect(img, new Rect((side - w) / 2, (side - h) / 2, w, h));
+    this.fm().writeImage(this.avatarPath(), ctx.getImage());
+  },
+
+  removeAvatar() {
+    const fm = this.fm();
+    if (fm.fileExists(this.avatarPath())) fm.remove(this.avatarPath());
   },
 
   /**
@@ -684,14 +743,34 @@ const WidgetView = {
     return Color.dynamic(new Color(t.secondaryLight), new Color(t.secondaryDark));
   },
 
-  build(state, family) {
-    if (family === "large") return this.buildLarge(state);
-    if (family === "medium") return this.buildMedium(state);
-    return this.buildSmall(state);
+  build(state, family, avatar) {
+    if (family === "large") return this.buildLarge(state, avatar);
+    if (family === "medium") return this.buildMedium(state, avatar);
+    return this.buildSmall(state, avatar);
+  },
+
+  /** 在 stack 里加一行 [圆形头像?] D+xxx，返回 D+ 文本元素 */
+  _addDPlusRow(stack, state, avatar, avatarSize, fontSize) {
+    const row = stack.addStack();
+    row.layoutHorizontally();
+    row.centerAlignContent();
+    if (avatar) {
+      const av = row.addImage(avatar);
+      av.imageSize = new Size(avatarSize, avatarSize);
+      av.cornerRadius = avatarSize / 2;
+      av.applyFillingContentMode();
+      row.addSpacer(6);
+    }
+    const dText = row.addText(`D+${Stats.dPlus(state)}`);
+    dText.font = Font.heavySystemFont(fontSize);
+    dText.textColor = this._primary();
+    dText.minimumScaleFactor = 0.5;
+    dText.lineLimit = 1;
+    return dText;
   },
 
   /** small：D+天数（超大字）+ 今日总条数一行小字 */
-  buildSmall(state) {
+  buildSmall(state, avatar) {
     const widget = new ListWidget();
     this._applyBackground(widget);
     widget.setPadding(14, 14, 14, 14);
@@ -704,11 +783,7 @@ const WidgetView = {
 
     widget.addSpacer();
 
-    const dText = widget.addText(`D+${Stats.dPlus(state)}`);
-    dText.font = Font.heavySystemFont(34);
-    dText.textColor = this._primary();
-    dText.minimumScaleFactor = 0.6;
-    dText.lineLimit = 1;
+    this._addDPlusRow(widget, state, avatar, 30, 34);
 
     widget.addSpacer();
 
@@ -727,7 +802,7 @@ const WidgetView = {
   },
 
   /** medium：左侧昵称 + D+ + 今日条数；右侧近 30 天迷你热力格；底部统计 */
-  buildMedium(state) {
+  buildMedium(state, avatar) {
     const widget = new ListWidget();
     this._applyBackground(widget);
     widget.setPadding(16, 18, 14, 18);
@@ -748,11 +823,7 @@ const WidgetView = {
 
     left.addSpacer(6);
 
-    const dText = left.addText(`D+${Stats.dPlus(state)}`);
-    dText.font = Font.heavySystemFont(38);
-    dText.textColor = this._primary();
-    dText.minimumScaleFactor = 0.5;
-    dText.lineLimit = 1;
+    this._addDPlusRow(left, state, avatar, 32, 38);
 
     left.addSpacer(4);
 
@@ -768,16 +839,20 @@ const WidgetView = {
 
     body.addSpacer();
 
-    // 右列：近 30 天迷你热力格
+    // 右列：近 30 天迷你热力格（包一层竖排 stack 往下压、右侧留白往左挪）
     const gridOpts = { days: 30, cols: 6, cell: 15, gap: 4 };
     const m = HeatmapPainter.gridMetrics(gridOpts);
     const img = HeatmapPainter.paintRecentGrid(state, {
       ...gridOpts,
       dark: Device.isUsingDarkAppearance(),
     });
-    const imgEl = body.addImage(img);
+    const right = body.addStack();
+    right.layoutVertically();
+    right.addSpacer(12); // 往下
+    const imgEl = right.addImage(img);
     imgEl.imageSize = new Size(m.w, m.h); // 按原尺寸显示，不让系统拉伸铺满
     imgEl.centerAlignImage();
+    body.addSpacer(10); // 距右边留白，整体往左
 
     widget.addSpacer(8);
 
@@ -792,8 +867,8 @@ const WidgetView = {
     return widget;
   },
 
-  /** large：顶部昵称 + D+ 与今日计数，中间近 30 天热力格，底部统计 */
-  buildLarge(state) {
+  /** large：顶部昵称 + 头像/D+，今日四类计数，近 6 周热力格（42 格），底部两行统计 */
+  buildLarge(state, avatar) {
     const widget = new ListWidget();
     this._applyBackground(widget);
     widget.setPadding(16, 16, 12, 16);
@@ -811,10 +886,7 @@ const WidgetView = {
 
     header.addSpacer();
 
-    const dText = header.addText(`D+${Stats.dPlus(state)}`);
-    dText.font = Font.heavySystemFont(24);
-    dText.textColor = this._primary();
-    dText.lineLimit = 1;
+    this._addDPlusRow(header, state, avatar, 26, 24);
 
     widget.addSpacer(2);
 
@@ -830,12 +902,10 @@ const WidgetView = {
     todayText.textColor = this._secondary();
     todayText.lineLimit = 1;
 
-    widget.addSpacer(6);
-
     widget.addSpacer();
 
-    // 近 30 天热力格（GitHub 风格，无日期数字；静态位图，按当前深浅色取色）
-    const gridOpts = { days: 30, cols: 10, cell: 21, gap: 5 };
+    // 近 6 周热力格（42 格，GitHub 风格，无日期数字；静态位图，按当前深浅色取色）
+    const gridOpts = { days: 42, cols: 7, cell: 26, gap: 6 };
     const m = HeatmapPainter.gridMetrics(gridOpts);
     const img = HeatmapPainter.paintRecentGrid(state, {
       ...gridOpts,
@@ -847,14 +917,24 @@ const WidgetView = {
 
     widget.addSpacer();
 
-    // 底部：近 30 天 / 累计 / 日均
-    const footer = widget.addText(
-      `近30天 ${Stats.recentTotal(state, 30)} 条 · 累计 ${Stats.grandTotal(state)} 条 · 日均 ${Stats.dayAvg(state)}`
+    // 底部两行：月度对比 + 累计
+    const line1 = widget.addText(
+      `本月 ${Stats.monthTotal(state, 0)} 条 · 上月 ${Stats.monthTotal(state, -1)} 条 · 环比 ${Stats.momText(state)}`
     );
-    footer.font = Font.mediumSystemFont(12);
-    footer.textColor = this._secondary();
-    footer.centerAlignText();
-    footer.lineLimit = 1;
+    line1.font = Font.mediumSystemFont(12);
+    line1.textColor = this._secondary();
+    line1.centerAlignText();
+    line1.lineLimit = 1;
+
+    widget.addSpacer(4);
+
+    const line2 = widget.addText(
+      `近6周 ${Stats.recentTotal(state, 42)} 条 · 累计 ${Stats.grandTotal(state)} 条 · 日均 ${Stats.dayAvg(state)}`
+    );
+    line2.font = Font.mediumSystemFont(12);
+    line2.textColor = this._secondary();
+    line2.centerAlignText();
+    line2.lineLimit = 1;
 
     return widget;
   },
@@ -891,11 +971,12 @@ const PanelView = {
     if (!state) return;
     let feedback = null; // { type, count } 最近一次点击的反馈
 
-    const t = theme();
-    const primary = new Color(t.primaryLight);
-    const secondary = new Color(t.secondaryLight);
-
     const render = () => {
+      // 每次重绘时取当前主题色，切换主题后立即生效
+      const t = theme();
+      const primary = new Color(t.primaryLight);
+      const secondary = new Color(t.secondaryLight);
+
       table.removeAllRows();
 
       // ---- 头部 ----
@@ -1008,6 +1089,62 @@ const PanelView = {
           }
         };
         table.addRow(backfillRow);
+
+        // ---- 切换主题 ----
+        const themeRow = new UITableRow();
+        themeRow.height = 48;
+        themeRow.dismissOnSelect = false;
+        const themeCell = themeRow.addText(
+          "🎨  切换主题",
+          `当前：${t.label}（组件稍后自动换色）`
+        );
+        themeCell.titleFont = Font.mediumSystemFont(16);
+        themeCell.subtitleFont = Font.systemFont(12);
+        themeCell.subtitleColor = secondary;
+        themeRow.onSelect = async () => {
+          const names = Object.keys(CONFIG.theme);
+          const a = new Alert();
+          a.title = "切换主题";
+          for (const n of names) a.addAction(CONFIG.theme[n].label);
+          a.addCancelAction("取消");
+          const idx = await a.presentSheet();
+          if (idx === -1) return;
+          const chosen = names[idx];
+          state = await Store.mutate((s) => { s.config.theme = chosen; });
+          CONFIG.themeName = chosen;
+          render();
+        };
+        table.addRow(themeRow);
+
+        // ---- 组件头像 ----
+        const avatarRow = new UITableRow();
+        avatarRow.height = 48;
+        avatarRow.dismissOnSelect = false;
+        const avatarCell = avatarRow.addText(
+          "🖼  组件头像",
+          Store.hasAvatar() ? "已设置 · 显示在组件 D+ 前面" : "从相册选一张，显示在组件 D+ 前面"
+        );
+        avatarCell.titleFont = Font.mediumSystemFont(16);
+        avatarCell.subtitleFont = Font.systemFont(12);
+        avatarCell.subtitleColor = secondary;
+        avatarRow.onSelect = async () => {
+          const a = new Alert();
+          a.title = "组件头像";
+          a.addAction("从相册选择");
+          if (Store.hasAvatar()) a.addDestructiveAction("移除头像");
+          a.addCancelAction("取消");
+          const idx = await a.presentAlert();
+          if (idx === 0) {
+            try {
+              const img = await Photos.fromLibrary();
+              if (img) Store.saveAvatar(img);
+            } catch (e) { /* 用户取消选择 */ }
+          } else if (idx === 1) {
+            Store.removeAvatar();
+          }
+          render();
+        };
+        table.addRow(avatarRow);
       }
 
       // ---- 统计区（只读） ----
@@ -1138,9 +1275,14 @@ async function main() {
   if (config.runsInWidget) {
     // ---- Widget 模式：静态快照，点击跳回脚本 ----
     const { state } = await Store.load();
-    const widget = state
-      ? WidgetView.build(state, config.widgetFamily)
-      : WidgetView.buildEmpty();
+    let widget;
+    if (state) {
+      CONFIG.themeName = state.config.theme || CONFIG.themeName;
+      const avatar = await Store.loadAvatar();
+      widget = WidgetView.build(state, config.widgetFamily, avatar);
+    } else {
+      widget = WidgetView.buildEmpty();
+    }
     widget.url = URLScheme.forRunningScript();
     Script.setWidget(widget);
   } else {
@@ -1175,6 +1317,7 @@ async function main() {
       }
     }
 
+    CONFIG.themeName = state.config.theme || CONFIG.themeName;
     await PanelView.present();
   }
   Script.complete();

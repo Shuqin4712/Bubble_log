@@ -203,6 +203,22 @@ function assertEq(actual, expected, msg) {
   assert(!(tKey in edited.days), "全部清零后从 days 中移除");
   assertEq(Stats.grandTotal(edited), 0, "清零后累计归零");
 
+  console.log("== 主题色板 ==");
+  const paletteKeys = [
+    "label", "bgTopLight", "bgBottomLight", "bgTopDark", "bgBottomDark",
+    "primaryLight", "primaryDark", "secondaryLight", "secondaryDark",
+    "heatBase", "heatBaseDark", "heatLevels", "heatText", "heatToday", "heatTodayDark",
+  ];
+  for (const name of ["pink", "gray", "blue"]) {
+    const p = CONFIG.theme[name];
+    assert(p && paletteKeys.every((k) => k in p), `${name} 主题色板字段完整`);
+    assert(p && p.heatLevels.length === 4, `${name} 主题热力图为 4 档色阶`);
+  }
+  // 切主题写入 state
+  const themed = await Store.mutate((s) => { s.config.theme = "blue"; });
+  assertEq(themed.config.theme, "blue", "主题选择持久化到 state.config.theme");
+  await Store.mutate((s) => { s.config.theme = "pink"; });
+
   console.log("== 备份与损坏恢复 ==");
   // 上面多次 save 已产生备份；现在写坏主文件
   const fm = Store.fm();

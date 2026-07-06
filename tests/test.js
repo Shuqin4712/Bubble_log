@@ -154,6 +154,14 @@ function assertEq(actual, expected, msg) {
   Store.rebuildTotals(s2);
   assertEq(Stats.grandTotal(s2), 6, "grandTotal");
   assert(typeof Stats.momText(s2) === "string", "环比文案可生成");
+  // 近 N 天统计：31 天前的记录不计入近 30 天，但计入累计
+  const oldKey = dateKey(new Date(Date.now() - 31 * 86400000));
+  s2.days[oldKey] = { text: 2, voice: 0, image: 0, emoji: 0 };
+  Store.rebuildTotals(s2);
+  assertEq(Stats.recentTotal(s2, 30), 6, "recentTotal 只统计近 30 天");
+  assertEq(Stats.grandTotal(s2), 8, "31 天前的记录仍计入累计");
+  delete s2.days[oldKey];
+  Store.rebuildTotals(s2);
   const s100 = {
     config: { idolName: "OO", startDate: dateKey(new Date(Date.now() - 99 * 86400000)), theme: "pink" },
     days: {}, totals: { text: 0, voice: 0, image: 0, emoji: 0 }, lastAction: null,

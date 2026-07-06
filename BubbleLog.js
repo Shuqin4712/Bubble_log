@@ -42,9 +42,9 @@ const CONFIG = {
       // 文字色
       primaryLight: "#B4245A", primaryDark: "#FFB7CE",
       secondaryLight: "#8E5A6E", secondaryDark: "#C99BAC",
-      // 热力图：0 条底色 + 4 档加深（1 / 2~3 / 4~6 / 7+）
+      // 热力图：0 条底色 + 4 档加深（1 / 2~3 / 4~6 / 7+），档间对比拉开
       heatBase: "#F3E3E9", heatBaseDark: "#4A3340",
-      heatLevels: ["#F7C6D9", "#F09BBD", "#E56B9F", "#CE3A7C"],
+      heatLevels: ["#F5AECB", "#EC74A8", "#D84487", "#A61B5F"],
       heatText: "#B4245A",
       heatToday: "#9C1D4E", heatTodayDark: "#FFB7CE",
     },
@@ -400,6 +400,19 @@ const Stats = {
     return this.dayTotal(state.totals);
   },
 
+  /** 近 N 天（含今天）总条数 */
+  recentTotal(state, days) {
+    const today = keyToDate(todayKey());
+    let sum = 0;
+    for (let i = 0; i < days; i++) {
+      const d = new Date(
+        today.getFullYear(), today.getMonth(), today.getDate() - i
+      );
+      sum += this.dayTotal(this.dayCounts(state, dateKey(d)));
+    }
+    return sum;
+  },
+
   /** 开通订阅至今的日均条数（1 位小数） */
   dayAvg(state) {
     const days = Math.max(1, this.dPlus(state));
@@ -429,6 +442,64 @@ const HeatmapPainter = {
     if (count <= 3) return new Color(t.heatLevels[1]);
     if (count <= 6) return new Color(t.heatLevels[2]);
     return new Color(t.heatLevels[3]);
+  },
+
+  /**
+   * GitHub 风格近 N 天热力格（组件用）：不画日期数字和星期标签，
+   * 纯色块按时间顺序叠放（左上最早，右下 = 今天，带描边高亮），返回 Image。
+   *
+   * opts：dark 深色取色；days 天数（默认 30）；cols 每行格数（默认 6）；
+   *       cell/gap 格子尺寸
+   */
+  paintRecentGrid(state, opts) {
+    opts = opts || {};
+    const dark = !!opts.dark;
+    const t = theme();
+    const days = opts.days || 30;
+    const cols = opts.cols || 6;
+    const rows = Math.ceil(days / cols);
+    const cell = opts.cell || 26;
+    const gap = opts.gap || 6;
+    const corner = Math.round(cell * 0.28);
+    const w = cols * cell + (cols - 1) * gap;
+    const h = rows * cell + (rows - 1) * gap;
+
+    const ctx = new DrawContext();
+    ctx.size = new Size(w, h);
+    ctx.opaque = false;
+    ctx.respectScreenScale = true;
+
+    const today = keyToDate(todayKey());
+    for (let i = 0; i < days; i++) {
+      // 用 (年,月,日-偏移) 构造，避免跨夏令时按毫秒加减出现日期偏移
+      const d = new Date(
+        today.getFullYear(), today.getMonth(), today.getDate() - (days - 1 - i)
+      );
+      const count = Stats.dayTotal(Stats.dayCounts(state, dateKey(d)));
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = col * (cell + gap);
+      const y = row * (cell + gap);
+
+      const path = new Path();
+      path.addRoundedRect(new Rect(x, y, cell, cell), corner, corner);
+      ctx.addPath(path);
+      ctx.setFillColor(this.levelColor(count, dark));
+      ctx.fillPath();
+
+      if (i === days - 1) { // 今天
+        const ring = new Path();
+        ring.addRoundedRect(
+          new Rect(x + 1, y + 1, cell - 2, cell - 2), corner - 1, corner - 1
+        );
+        ctx.addPath(ring);
+        ctx.setStrokeColor(new Color(dark ? t.heatTodayDark : t.heatToday));
+        ctx.setLineWidth(2);
+        ctx.strokePath();
+      }
+    }
+
+    return ctx.getImage();
   },
 
   /**
@@ -717,20 +788,19 @@ const WidgetView = {
 
     widget.addSpacer(6);
 
-    // 当月热力图（静态位图，按当前深浅色取色渲染）
-    const img = HeatmapPainter.paintCurrentMonth(state, {
+    // 近 30 天热力格（GitHub 风格，无日期数字；静态位图，按当前深浅色取色）
+    const img = HeatmapPainter.paintRecentGrid(state, {
       dark: Device.isUsingDarkAppearance(),
-      cell: 34, gap: 8, pad: 0,
-      showFooter: false, // 总条数用组件文字显示，跟随深浅色
+      days: 30, cols: 6, cell: 32, gap: 8,
     });
     const imgEl = widget.addImage(img);
     imgEl.centerAlignImage();
 
     widget.addSpacer();
 
-    // 底部：本月 / 累计 / 日均
+    // 底部：近 30 天 / 累计 / 日均
     const footer = widget.addText(
-      `本月 ${Stats.monthTotal(state, 0)} 条 · 累计 ${Stats.grandTotal(state)} 条 · 日均 ${Stats.dayAvg(state)}`
+      `近30天 ${Stats.recentTotal(state, 30)} 条 · 累计 ${Stats.grandTotal(state)} 条 · 日均 ${Stats.dayAvg(state)}`
     );
     footer.font = Font.mediumSystemFont(12);
     footer.textColor = this._secondary();

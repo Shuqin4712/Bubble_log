@@ -8,7 +8,7 @@
 
 ## 功能
 
-- **桌面组件**（small / medium）：D+ 天数、今日四类消息计数、累计总数，粉色渐变主题，支持深浅色模式
+- **桌面组件**（small / medium / large）：D+ 天数、今日四类消息计数、累计总数，粉色渐变主题，支持深浅色模式；large 档位完整展示当月热力图
 - **快速记录面板**：点组件打开，四个大按钮「💬 文字 / 🎙 语音 / 🖼 图片 / 😝 表情」点一下 +1，可连点；支持撤销上一条、补记其他日期
 - **统计**：今日明细、本月/上月/环比、历史累计、日均条数
 - **月度热力图**：日历式布局，消息越多颜色越深（类似 GitHub contribution graph）
@@ -22,7 +22,7 @@
    - 方式 A：Scriptable → 右上角 `+` → 粘贴代码 → 命名为 `BubbleLog`
    - 方式 B：把 `BubbleLog.js` 放进 iCloud Drive 的 `Scriptable/` 目录
 3. 在 Scriptable 里点一次脚本运行，跟随初始化引导输入爱豆昵称和订阅起始日（YYYY-MM-DD）
-4. 回到主屏幕长按 → 添加小组件 → Scriptable → 选 small 或 medium → 编辑组件，Script 选 `BubbleLog`
+4. 回到主屏幕长按 → 添加小组件 → Scriptable → 选 small / medium / large（large 带当月热力图）→ 编辑组件，Script 选 `BubbleLog`
 
 之后收到泡泡：**点组件 → 点对应类型按钮 → 关闭**，就记录完成了。
 

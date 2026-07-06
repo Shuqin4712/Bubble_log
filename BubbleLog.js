@@ -43,10 +43,10 @@ const CONFIG = {
       primaryLight: "#B4245A", primaryDark: "#FFB7CE",
       secondaryLight: "#8E5A6E", secondaryDark: "#C99BAC",
       // 热力图：0 条底色 + 4 档加深（1 / 2~3 / 4~6 / 7+）
-      heatBase: "#F3E3E9",
+      heatBase: "#F3E3E9", heatBaseDark: "#4A3340",
       heatLevels: ["#F7C6D9", "#F09BBD", "#E56B9F", "#CE3A7C"],
       heatText: "#B4245A",
-      heatToday: "#9C1D4E",
+      heatToday: "#9C1D4E", heatTodayDark: "#FFB7CE",
     },
   },
   themeName: "pink",
@@ -422,17 +422,26 @@ const Stats = {
 
 const HeatmapPainter = {
   /** 条数 → 色阶（0 = 底色空格；1 / 2~3 / 4~6 / 7+ 逐档加深） */
-  levelColor(count) {
+  levelColor(count, dark) {
     const t = theme();
-    if (count <= 0) return new Color(t.heatBase);
+    if (count <= 0) return new Color(dark ? t.heatBaseDark : t.heatBase);
     if (count === 1) return new Color(t.heatLevels[0]);
     if (count <= 3) return new Color(t.heatLevels[1]);
     if (count <= 6) return new Color(t.heatLevels[2]);
     return new Color(t.heatLevels[3]);
   },
 
-  /** 画当月日历式热力图（7 列 周日~周六 x 最多 6 行），下方标注当月总条数 */
-  paintCurrentMonth(state) {
+  /**
+   * 画当月日历式热力图（7 列 周日~周六 x 最多 6 行），返回 Image。
+   * DrawContext 出图是静态位图，Color.dynamic 不生效，
+   * 深浅色由调用方传 opts.dark（用 Device.isUsingDarkAppearance() 判断）。
+   *
+   * opts：dark 深色模式取色；cell/gap/pad 格子尺寸；
+   *       showFooter 是否在图内标注当月总条数（组件里改用组件文字，传 false）
+   */
+  paintCurrentMonth(state, opts) {
+    opts = opts || {};
+    const dark = !!opts.dark;
     const t = theme();
     const now = new Date();
     const year = now.getFullYear();
@@ -441,11 +450,16 @@ const HeatmapPainter = {
     const firstWeekday = new Date(year, month, 1).getDay(); // 0 = 周日
     const rows = Math.ceil((firstWeekday + daysInMonth) / 7);
 
-    const cell = 30, gap = 7, pad = 10;
-    const headerH = 26;  // 星期标签行
-    const footerH = 34;  // 当月总条数
+    const cell = opts.cell || 30;
+    const gap = opts.gap || 7;
+    const pad = opts.pad != null ? opts.pad : 10;
+    const headerH = Math.round(cell * 0.85); // 星期标签行
+    const showFooter = opts.showFooter !== false;
+    const footerH = showFooter ? 34 : 0;     // 当月总条数
     const w = pad * 2 + cell * 7 + gap * 6;
     const h = pad * 2 + headerH + rows * cell + (rows - 1) * gap + footerH;
+
+    const labelColor = new Color(dark ? t.secondaryDark : t.secondaryLight);
 
     const ctx = new DrawContext();
     ctx.size = new Size(w, h);
@@ -453,18 +467,20 @@ const HeatmapPainter = {
     ctx.respectScreenScale = true;
 
     // 星期标签
-    ctx.setFont(Font.mediumSystemFont(12));
-    ctx.setTextColor(new Color(t.secondaryLight));
+    ctx.setFont(Font.mediumSystemFont(Math.round(cell * 0.4)));
+    ctx.setTextColor(labelColor);
     ctx.setTextAlignedCenter();
     const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
     for (let i = 0; i < 7; i++) {
       const x = pad + i * (cell + gap);
-      ctx.drawTextInRect(weekdays[i], new Rect(x, pad, cell, headerH - 8));
+      ctx.drawTextInRect(weekdays[i], new Rect(x, pad, cell, headerH - 6));
     }
 
     // 日期格子
     const tKey = todayKey();
-    ctx.setFont(Font.mediumSystemFont(11));
+    const dayFont = Math.round(cell * 0.37);
+    const corner = Math.round(cell * 0.23);
+    ctx.setFont(Font.mediumSystemFont(dayFont));
     for (let day = 1; day <= daysInMonth; day++) {
       const idx = firstWeekday + day - 1;
       const col = idx % 7;
@@ -476,34 +492,39 @@ const HeatmapPainter = {
       const count = Stats.dayTotal(Stats.dayCounts(state, key));
 
       const path = new Path();
-      path.addRoundedRect(rect, 7, 7);
+      path.addRoundedRect(rect, corner, corner);
       ctx.addPath(path);
-      ctx.setFillColor(this.levelColor(count));
+      ctx.setFillColor(this.levelColor(count, dark));
       ctx.fillPath();
 
       // 今天加描边高亮
       if (key === tKey) {
         const ring = new Path();
-        ring.addRoundedRect(new Rect(x + 1, y + 1, cell - 2, cell - 2), 6, 6);
+        ring.addRoundedRect(new Rect(x + 1, y + 1, cell - 2, cell - 2), corner - 1, corner - 1);
         ctx.addPath(ring);
-        ctx.setStrokeColor(new Color(t.heatToday));
+        ctx.setStrokeColor(new Color(dark ? t.heatTodayDark : t.heatToday));
         ctx.setLineWidth(2);
         ctx.strokePath();
       }
 
-      // 日期数字（深色格用白字）
-      ctx.setTextColor(count >= 4 ? Color.white() : new Color(t.secondaryLight));
-      ctx.drawTextInRect(String(day), new Rect(x, y + (cell - 14) / 2, cell, 14));
+      // 日期数字：深色格用白字；有记录的浅粉格固定深字保证对比度；空格随模式
+      if (count >= 4) ctx.setTextColor(Color.white());
+      else if (count >= 1) ctx.setTextColor(new Color(t.secondaryLight));
+      else ctx.setTextColor(labelColor);
+      const textH = dayFont + 3;
+      ctx.drawTextInRect(String(day), new Rect(x, y + (cell - textH) / 2, cell, textH));
     }
 
     // 当月总条数
-    const monthSum = Stats.monthTotal(state, 0);
-    ctx.setFont(Font.semiboldSystemFont(14));
-    ctx.setTextColor(new Color(t.heatText));
-    ctx.drawTextInRect(
-      `${month + 1}月共 ${monthSum} 条泡泡`,
-      new Rect(0, h - pad - footerH + 10, w, 20)
-    );
+    if (showFooter) {
+      const monthSum = Stats.monthTotal(state, 0);
+      ctx.setFont(Font.semiboldSystemFont(14));
+      ctx.setTextColor(new Color(dark ? t.primaryDark : t.heatText));
+      ctx.drawTextInRect(
+        `${month + 1}月共 ${monthSum} 条泡泡`,
+        new Rect(0, h - pad - footerH + 10, w, 20)
+      );
+    }
 
     return ctx.getImage();
   },
@@ -538,7 +559,9 @@ const WidgetView = {
   },
 
   build(state, family) {
-    return family === "medium" ? this.buildMedium(state) : this.buildSmall(state);
+    if (family === "large") return this.buildLarge(state);
+    if (family === "medium") return this.buildMedium(state);
+    return this.buildSmall(state);
   },
 
   /** small：D+天数（超大字）+ 今日总条数一行小字 */
@@ -649,6 +672,69 @@ const WidgetView = {
     );
     footer.font = Font.mediumSystemFont(11);
     footer.textColor = this._secondary();
+    footer.lineLimit = 1;
+
+    return widget;
+  },
+
+  /** large：顶部昵称 + D+ 与今日计数，中间当月热力图，底部月度/累计 */
+  buildLarge(state) {
+    const widget = new ListWidget();
+    this._applyBackground(widget);
+    widget.setPadding(16, 16, 12, 16);
+
+    // 顶部：昵称 + D+
+    const header = widget.addStack();
+    header.layoutHorizontally();
+    header.centerAlignContent();
+
+    const name = state.config.idolName + (Stats.isAnniversary(state) ? " 🎉" : "");
+    const nameText = header.addText(`🫧 ${name}`);
+    nameText.font = Font.semiboldSystemFont(15);
+    nameText.textColor = this._secondary();
+    nameText.lineLimit = 1;
+
+    header.addSpacer();
+
+    const dText = header.addText(`D+${Stats.dPlus(state)}`);
+    dText.font = Font.heavySystemFont(24);
+    dText.textColor = this._primary();
+    dText.lineLimit = 1;
+
+    widget.addSpacer(2);
+
+    // 今日一行
+    const today = Stats.todayCounts(state);
+    const todayLine = Stats.dayTotal(today) === 0
+      ? "今天还没有泡泡 🫧"
+      : "今日  " + CONFIG.types
+          .map((tp) => `${CONFIG.typeMeta[tp].emoji} ${today[tp]}`)
+          .join("  ");
+    const todayText = widget.addText(todayLine);
+    todayText.font = Font.mediumSystemFont(13);
+    todayText.textColor = this._secondary();
+    todayText.lineLimit = 1;
+
+    widget.addSpacer(6);
+
+    // 当月热力图（静态位图，按当前深浅色取色渲染）
+    const img = HeatmapPainter.paintCurrentMonth(state, {
+      dark: Device.isUsingDarkAppearance(),
+      cell: 34, gap: 8, pad: 0,
+      showFooter: false, // 总条数用组件文字显示，跟随深浅色
+    });
+    const imgEl = widget.addImage(img);
+    imgEl.centerAlignImage();
+
+    widget.addSpacer();
+
+    // 底部：本月 / 累计 / 日均
+    const footer = widget.addText(
+      `本月 ${Stats.monthTotal(state, 0)} 条 · 累计 ${Stats.grandTotal(state)} 条 · 日均 ${Stats.dayAvg(state)}`
+    );
+    footer.font = Font.mediumSystemFont(12);
+    footer.textColor = this._secondary();
+    footer.centerAlignText();
     footer.lineLimit = 1;
 
     return widget;
@@ -826,7 +912,9 @@ const PanelView = {
       const heatRow = new UITableRow();
       heatRow.height = 250;
       heatRow.dismissOnSelect = false;
-      const img = HeatmapPainter.paintCurrentMonth(state);
+      const img = HeatmapPainter.paintCurrentMonth(state, {
+        dark: Device.isUsingDarkAppearance(),
+      });
       const imgCell = heatRow.addImage(img);
       imgCell.centerAligned();
       table.addRow(heatRow);

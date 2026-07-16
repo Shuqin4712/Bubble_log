@@ -716,6 +716,73 @@ const HeatmapPainter = {
 };
 
 // ============================================================
+// RingPainter — 计步环风格的累计仪表盘（面板用）
+// ============================================================
+
+const RingPainter = {
+  /**
+   * 画一个活动环：中心是累计总条数大字，外圈按四类消息占比分段着色
+   * （四类颜色取当前主题的 4 档热力色，从 12 点方向顺时针依次为
+   * 文字/语音/图片/表情）。DrawContext 没有圆弧 API，用密集打点画环。
+   */
+  paintTotalsRing(state, opts) {
+    opts = opts || {};
+    const dark = !!opts.dark;
+    const size = opts.size || 190;
+    const t = theme();
+
+    const ctx = new DrawContext();
+    ctx.size = new Size(size, size);
+    ctx.opaque = false;
+    ctx.respectScreenScale = true;
+
+    const cx = size / 2;
+    const cy = size / 2;
+    const thickness = Math.round(size * 0.11);
+    const radius = size / 2 - thickness / 2 - 2;
+    const grand = Stats.grandTotal(state);
+
+    const drawDot = (deg, color) => {
+      const rad = (deg * Math.PI) / 180;
+      ctx.setFillColor(color);
+      ctx.fillEllipse(new Rect(
+        cx + radius * Math.cos(rad) - thickness / 2,
+        cy + radius * Math.sin(rad) - thickness / 2,
+        thickness, thickness
+      ));
+    };
+
+    const step = 1; // 打点角度间隔（度），越小越平滑
+    if (grand === 0) {
+      const base = new Color(dark ? t.heatBaseDark : t.heatBase);
+      for (let d = -90; d < 270; d += step) drawDot(d, base);
+    } else {
+      let start = -90; // 12 点方向起
+      CONFIG.types.forEach((tp, i) => {
+        const span = (360 * state.totals[tp]) / grand;
+        const color = new Color(t.heatLevels[i]);
+        for (let d = start; d < start + span; d += step) drawDot(d, color);
+        start += span;
+      });
+    }
+
+    // 中心：累计总数 + 说明
+    ctx.setTextAlignedCenter();
+    ctx.setFont(Font.heavySystemFont(Math.round(size * 0.18)));
+    ctx.setTextColor(new Color(dark ? t.primaryDark : t.primaryLight));
+    ctx.drawTextInRect(
+      String(grand),
+      new Rect(0, cy - size * 0.155, size, size * 0.24)
+    );
+    ctx.setFont(Font.mediumSystemFont(Math.round(size * 0.065)));
+    ctx.setTextColor(new Color(dark ? t.secondaryDark : t.secondaryLight));
+    ctx.drawTextInRect("累计泡泡", new Rect(0, cy + size * 0.07, size, size * 0.1));
+
+    return ctx.getImage();
+  },
+};
+
+// ============================================================
 // WidgetView — 组件渲染：small / medium
 // ============================================================
 
@@ -744,9 +811,63 @@ const WidgetView = {
   },
 
   build(state, family, avatar) {
+    if (family && family.startsWith("accessory")) {
+      return this.buildAccessory(state, family);
+    }
     if (family === "large") return this.buildLarge(state, avatar);
     if (family === "medium") return this.buildMedium(state, avatar);
     return this.buildSmall(state, avatar);
+  },
+
+  /**
+   * 锁屏小组件（accessoryRectangular / accessoryCircular / accessoryInline）。
+   * 锁屏由系统统一做玻璃拟态渲染：不画渐变背景、不放头像、不设自定义颜色，
+   * 交给系统上色才不会发灰发怪。
+   */
+  buildAccessory(state, family) {
+    const widget = new ListWidget();
+    widget.addAccessoryWidgetBackground = true; // 系统自带的毛玻璃底
+    const todayTotal = Stats.dayTotal(Stats.todayCounts(state));
+
+    if (family === "accessoryInline") {
+      // 时间上方的单行
+      widget.addText(`🫧 D+${Stats.dPlus(state)} · 今日 ${todayTotal} 条`);
+      return widget;
+    }
+
+    if (family === "accessoryCircular") {
+      widget.setPadding(2, 2, 2, 2);
+      widget.addSpacer();
+      const d = widget.addText(`D+${Stats.dPlus(state)}`);
+      d.font = Font.heavySystemFont(16);
+      d.minimumScaleFactor = 0.5;
+      d.lineLimit = 1;
+      d.centerAlignText();
+      const c = widget.addText(`🫧 ${todayTotal}`);
+      c.font = Font.mediumSystemFont(10);
+      c.lineLimit = 1;
+      c.centerAlignText();
+      widget.addSpacer();
+      return widget;
+    }
+
+    // accessoryRectangular（锁屏时间下方的矩形位）
+    widget.setPadding(4, 6, 4, 6);
+    const name = widget.addText(
+      `🫧 ${state.config.idolName}${Stats.isAnniversary(state) ? " 🎉" : ""}`
+    );
+    name.font = Font.semiboldSystemFont(12);
+    name.lineLimit = 1;
+    const d = widget.addText(`D+${Stats.dPlus(state)}`);
+    d.font = Font.heavySystemFont(20);
+    d.minimumScaleFactor = 0.6;
+    d.lineLimit = 1;
+    const c = widget.addText(
+      todayTotal === 0 ? "今天还没有泡泡 🫧" : `今日 ${todayTotal} 条`
+    );
+    c.font = Font.mediumSystemFont(11);
+    c.lineLimit = 1;
+    return widget;
   },
 
   /** 在 stack 里加一行 [圆形头像?] D+xxx，返回 D+ 文本元素 */
@@ -1156,6 +1277,17 @@ const PanelView = {
       sh.titleColor = primary;
       table.addRow(statsHeader);
 
+      // ---- 累计仪表盘：计步环样式，中间累计总数，外圈四类占比 ----
+      const ringRow = new UITableRow();
+      ringRow.height = 205;
+      ringRow.dismissOnSelect = false;
+      const ringImg = RingPainter.paintTotalsRing(state, {
+        dark: Device.isUsingDarkAppearance(),
+        size: 190,
+      });
+      ringRow.addImage(ringImg).centerAligned();
+      table.addRow(ringRow);
+
       const addStatRow = (title, subtitle) => {
         const row = new UITableRow();
         row.height = 46;
@@ -1180,9 +1312,12 @@ const PanelView = {
       const prev = Stats.monthTotal(state, -1);
       addStatRow(`本月 ${cur} 条 · 上月 ${prev} 条`, `环比 ${Stats.momText(state)}`);
 
+      // 四类累计明细（顺序与环的分段一致：文字/语音/图片/表情，颜色由浅到深）
       addStatRow(
-        `历史累计 ${Stats.grandTotal(state)} 条`,
-        `订阅 ${Stats.dPlus(state)} 天 · 日均 ${Stats.dayAvg(state)} 条`
+        CONFIG.types
+          .map((tp) => `${CONFIG.typeMeta[tp].emoji} ${state.totals[tp]}`)
+          .join("　"),
+        `四类累计 · 订阅 ${Stats.dPlus(state)} 天 · 日均 ${Stats.dayAvg(state)} 条`
       );
 
       // ---- 月度热力图 ----

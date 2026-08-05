@@ -383,39 +383,85 @@ const Store = {
     if (fm.fileExists(this.avatarPath())) fm.remove(this.avatarPath());
   },
 
-  // ---------- 月报海报用的艺人照片 ----------
-  // 和组件头像分开存：头像是 256px 的圆形小图，放到 1080px 宽的海报上会糊。
+  // ---------- 每日照片（月报日历格子的底图） ----------
+  // 存成 photos/YYYY-MM-DD.jpg，一天一张。裁成明细格的 2 倍尺寸：
+  // 再大对 154pt 的格子没有意义，只会拖慢月报出图并占满 iCloud。
 
-  posterPhotoPath() {
-    return this.fm().joinPath(this.dirPath(), "poster.png");
+  photosDir() {
+    return this.fm().joinPath(this.dirPath(), "photos");
   },
 
-  hasPosterPhoto() {
-    return this.fm().fileExists(this.posterPhotoPath());
-  },
-
-  async loadPosterPhoto() {
+  ensurePhotosDir() {
     const fm = this.fm();
-    const p = this.posterPhotoPath();
-    if (!fm.fileExists(p)) return null;
-    if (this._usingiCloud) {
-      try { await fm.downloadFileFromiCloud(p); } catch (e) {}
-    }
-    try { return fm.readImage(p); } catch (e) { return null; }
-  },
-
-  /** 存成海报通栏比例（1080x640），画海报时 1:1 贴上去，不再二次缩放 */
-  savePosterPhoto(img) {
     this.ensureDir();
-    this.fm().writeImage(
-      this.posterPhotoPath(),
-      this._cropTo(img, PosterPainter.W, PosterPainter.heroH)
-    );
+    if (!fm.isDirectory(this.photosDir())) fm.createDirectory(this.photosDir(), true);
   },
 
-  removePosterPhoto() {
+  dayPhotoPath(key) {
+    return this.fm().joinPath(this.photosDir(), `${key}.jpg`);
+  },
+
+  hasDayPhoto(key) {
+    return this.fm().fileExists(this.dayPhotoPath(key));
+  },
+
+  /** 某月已有照片的日期集合，用于在紧凑日历上标记，避免逐天 fileExists */
+  monthPhotoKeys(year, month) {
     const fm = this.fm();
-    if (fm.fileExists(this.posterPhotoPath())) fm.remove(this.posterPhotoPath());
+    const dir = this.photosDir();
+    if (!fm.isDirectory(dir)) return {};
+    const prefix = Stats.monthKey(year, month) + "-";
+    const out = {};
+    try {
+      for (const name of fm.listContents(dir)) {
+        if (name.startsWith(prefix) && name.endsWith(".jpg")) out[name.slice(0, 10)] = true;
+      }
+    } catch (e) { /* 目录读不到就当没有照片 */ }
+    return out;
+  },
+
+  /**
+   * 载入某月全部照片，返回 { "YYYY-MM-DD": Image }。
+   * 一次最多 31 张 308x280 的图，解码后约 10MB——在 App 模式下没问题，
+   * 但绝不要在组件里调用（组件内存上限低得多）。
+   */
+  async loadMonthPhotos(year, month) {
+    const fm = this.fm();
+    const out = {};
+    for (const key of Object.keys(this.monthPhotoKeys(year, month))) {
+      const p = this.dayPhotoPath(key);
+      if (this._usingiCloud) {
+        try { await fm.downloadFileFromiCloud(p); } catch (e) { continue; }
+      }
+      try {
+        const img = fm.readImage(p);
+        if (img) out[key] = img;
+      } catch (e) { /* 单张坏了不影响整月 */ }
+    }
+    return out;
+  },
+
+  /** 保存某天的照片：居中裁成明细格比例，优先存 JPEG（PNG 在这个量级会撑爆 iCloud） */
+  saveDayPhoto(key, img) {
+    this.ensurePhotosDir();
+    const cropped = this._cropTo(
+      img,
+      HeatmapPainter.DETAIL_CELL_W * 2,
+      HeatmapPainter.DETAIL_CELL_H * 2
+    );
+    const fm = this.fm();
+    const path = this.dayPhotoPath(key);
+    try {
+      fm.write(path, Data.fromJPEG(cropped, 0.8));
+    } catch (e) {
+      fm.writeImage(path, cropped); // 拿不到 JPEG 编码就退回 PNG
+    }
+  },
+
+  removeDayPhoto(key) {
+    const fm = this.fm();
+    const p = this.dayPhotoPath(key);
+    if (fm.fileExists(p)) fm.remove(p);
   },
 
   /**
@@ -861,6 +907,7 @@ const HeatmapPainter = {
     // 日期格子
     const tKey = todayKey();
     const bounds = Stats.heatBoundaries(state);
+    const photoKeys = opts.photoKeys || {}; // 见 Store.monthPhotoKeys
     const dateFont = Math.max(8, Math.round(cell * 0.24)); // 左上角角标
     const corner = Math.round(cell * 0.23);
     for (let day = 1; day <= daysInMonth; day++) {
@@ -917,6 +964,15 @@ const HeatmapPainter = {
           new Rect(x, y + (cell - countH) / 2 + 3, cell, countH)
         );
       }
+
+      // 配了照片的日子在右下角点一个小点（紧凑格太小，塞不下缩略图）
+      if (photoKeys[key]) {
+        const r = Math.max(2, Math.round(cell * 0.07));
+        ctx.setFillColor(
+          level >= 2 ? new Color("#FFFFFF", 0.9) : new Color(dark ? t.heatTodayDark : t.heatToday, 0.75)
+        );
+        ctx.fillEllipse(new Rect(x + cell - r * 2 - 3, y + cell - r * 2 - 3, r * 2, r * 2));
+      }
     }
 
     // 当月总条数
@@ -945,6 +1001,11 @@ const HeatmapPainter = {
 // 挂在 HeatmapPainter 上，共用 levelIndex / heatBoundaries 那套分档逻辑。
 
 Object.assign(HeatmapPainter, {
+  // 明细格默认尺寸。每日照片按 2 倍存盘（见 Store.saveDayPhoto），
+  // 改这里的话照片比例也要跟着改，否则旧照片贴上去会有黑边。
+  DETAIL_CELL_W: 154,
+  DETAIL_CELL_H: 140,
+
   /** 条数 → 该档的色阶 hex（0 条返回 null），明细格要在此基础上调淡 */
   levelHex(count, bounds) {
     const i = this.levelIndex(count, bounds);
@@ -958,8 +1019,8 @@ Object.assign(HeatmapPainter, {
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     const firstWeekday = new Date(year, month, 1).getDay();
     const rows = Math.ceil((firstWeekday + daysInMonth) / 7);
-    const cellW = opts.cellW || 126;
-    const cellH = opts.cellH || 100;
+    const cellW = opts.cellW || this.DETAIL_CELL_W;
+    const cellH = opts.cellH || this.DETAIL_CELL_H;
     const gap = opts.gap != null ? opts.gap : 8;
     const pad = opts.pad != null ? opts.pad : 0;
     const headerH = Math.round(cellH * 0.44);
@@ -977,6 +1038,10 @@ Object.assign(HeatmapPainter, {
    * 一天没有任何记录时格子留空（只剩日期），避免满屏的 0。
    * 底色仍按热力分档，但调淡到只剩「氛围」——格子里有四组数字要读，
    * 用原色阶会盖掉文字。
+   *
+   * opts.photos：{ "YYYY-MM-DD": Image } 当天照片，有照片的格子用照片做底图。
+   * 照片上压一层暗色蒙版再写白字——照片明暗不可控，不压蒙版数字必然有读不清的格子。
+   * 照片需调用方预先异步载入（见 Store.loadMonthPhotos），本函数是同步的。
    */
   paintMonthDetail(state, year, monthNo, opts) {
     opts = opts || {};
@@ -986,6 +1051,7 @@ Object.assign(HeatmapPainter, {
     const { month, daysInMonth, firstWeekday, cellW, cellH, gap, pad, headerH, w, h } = m;
 
     const bounds = Stats.heatBoundaries(state);
+    const photos = opts.photos || {};
     const labelColor = new Color(dark ? t.secondaryDark : t.secondaryLight);
     const textColor = new Color(dark ? t.secondaryDark : t.secondaryLight);
     const emptyFill = new Color(dark ? t.heatBaseDark : t.heatBase);
@@ -1020,6 +1086,8 @@ Object.assign(HeatmapPainter, {
       const counts = Stats.dayCounts(state, key);
       const total = Stats.dayTotal(counts);
 
+      const photo = photos[key];
+
       // 底色：把档位色往背景色调淡，保证四组数字读得清
       const hex = this.levelHex(total, bounds);
       const path = new Path();
@@ -1031,6 +1099,15 @@ Object.assign(HeatmapPainter, {
           : new Color(mixHex(hex, dark ? t.bgBottomDark : "#FFFFFF", dark ? 0.55 : 0.55))
       );
       ctx.fillPath();
+
+      // 当天照片做底图。DrawContext 没有裁剪路径 API，照片只能画成直角，
+      // 所以明细格的圆角本来就取得很小（16%），直角照片压上去不明显。
+      if (photo) {
+        ctx.drawImageInRect(photo, new Rect(x, y, cellW, cellH));
+        // 暗色蒙版：白字要在任意照片上都读得清，这层不能省
+        ctx.setFillColor(new Color("#000000", total > 0 ? 0.46 : 0.28));
+        ctx.fillRect(new Rect(x, y, cellW, cellH));
+      }
 
       if (key === tKey) {
         const ring = new Path();
@@ -1044,7 +1121,11 @@ Object.assign(HeatmapPainter, {
       // 左上角日期
       ctx.setTextAlignedLeft();
       ctx.setFont(Font.semiboldSystemFont(dateFont));
-      ctx.setTextColor(new Color(dark ? t.secondaryDark : t.secondaryLight, 0.9));
+      ctx.setTextColor(
+        photo
+          ? new Color("#FFFFFF", 0.95)
+          : new Color(dark ? t.secondaryDark : t.secondaryLight, 0.9)
+      );
       ctx.drawTextInRect(
         String(day),
         new Rect(x + inset, y + Math.round(cellH * 0.05), cellW - inset * 2, dateFont + 4)
@@ -1063,7 +1144,13 @@ Object.assign(HeatmapPainter, {
         const ex = x + inset + (i % 2) * colW;
         const ey = gridTop + Math.floor(i / 2) * rowH;
         // 0 的那一类压暗，有记录的类才是要读的信息
-        ctx.setTextColor(counts[tp] > 0 ? textColor : new Color(dark ? t.secondaryDark : t.secondaryLight, 0.3));
+        ctx.setTextColor(
+          photo
+            ? new Color("#FFFFFF", counts[tp] > 0 ? 1 : 0.45)
+            : counts[tp] > 0
+              ? textColor
+              : new Color(dark ? t.secondaryDark : t.secondaryLight, 0.3)
+        );
         ctx.drawTextInRect(
           `${CONFIG.typeMeta[tp].emoji}${counts[tp]}`,
           new Rect(ex, ey, colW, entryFont + 6)
@@ -1156,42 +1243,46 @@ const RingPainter = {
 // ============================================================
 
 const PosterPainter = {
-  // 海报按 1080pt 宽绘制、respectScreenScale 关掉，出图就是 1080px 宽的位图——
+  // 海报按 1200pt 宽绘制、respectScreenScale 关掉，出图就是 1200px 宽的位图——
   // 发朋友圈/微博的常规尺寸，且内存可控（约 10MB）。
-  // 若跟随屏幕倍率，3x 设备上会变成 3240px 宽、近 90MB，Scriptable 扛不住。
-  W: 1080,
-  padX: 72,
-  heroH: 640, // 通栏艺人照片高度（宽 1080，比例约 1:0.59）
+  // 若跟随屏幕倍率，3x 设备上会变成 3600px 宽、近 130MB，Scriptable 扛不住。
+  W: 1200,
+  padX: 90,   // 文字版心
+  calPad: 36, // 日历版心：日历是可视化主体，留白比文字窄，格子尽量大
 
   /**
    * 画一张竖版月报海报，返回 Image。
    * 海报是给人分享出去的，固定用浅色配色（深色底发到聊天里容易糊）。
    *
    * @param {object} r Stats.monthReport 的结果
-   * @param {Image|null} photo 艺人照片，已按 Store.savePosterPhoto 裁成通栏比例
+   * @param {object} photos 当天照片 { "YYYY-MM-DD": Image }，见 Store.loadMonthPhotos
    */
-  paintMonthReport(state, r, photo) {
+  paintMonthReport(state, r, photos) {
     const t = theme();
     const W = this.W;
     const padX = this.padX;
     const innerW = W - padX * 2;
 
-    // 先量出日历尺寸，才能定总高
-    const calOpts = { cellW: Math.floor((innerW - 6 * 8) / 7), cellH: 100, gap: 8, pad: 0 };
+    // 先量出日历尺寸，才能定总高。格宽由版心反推，尽量占满
+    const gap = 8;
+    const calOpts = {
+      cellW: Math.floor((W - this.calPad * 2 - 6 * gap) / 7),
+      cellH: HeatmapPainter.DETAIL_CELL_H,
+      gap,
+      pad: 0,
+    };
     const cm = HeatmapPainter.detailMetrics(r.year, r.month, calOpts);
-
-    const heroH = photo ? this.heroH : 0;
     const statRowH = 130;
 
     // 自上而下堆版面，边堆边记录每块的 y
-    let y = heroH ? heroH + 44 : 76;
+    let y = 84;
     const L = {};
     L.title = y;    y += 70;
     L.sub = y;      y += 86;
     L.total = y;    y += 150;
     L.caption = y;  y += 82;
     L.types = y;    y += 92;
-    L.stats = y;    y += statRowH * 2 + 44;
+    L.stats = y;    y += statRowH * 2 + 48;
     L.cal = y;      y += cm.h + 52;
     L.footer = y;
     const H = y + 90;
@@ -1210,20 +1301,6 @@ const PosterPainter = {
 
     const primary = new Color(t.primaryLight);
     const secondary = new Color(t.secondaryLight);
-
-    // ---- 通栏艺人照片 ----
-    // 走通栏（不留边距）是为了避开 DrawContext 没有裁剪路径 API 的限制：
-    // 想要圆角就得手动补背景色的角块，通栏满出血反而更利落。
-    if (photo) {
-      ctx.drawImageInRect(photo, new Rect(0, 0, W, heroH));
-      // 照片底部压一层同色渐隐，让照片和渐变背景接得自然
-      const fadeH = 90;
-      for (let i = 0; i < fadeH; i += 2) {
-        const p = i / fadeH;
-        ctx.setFillColor(new Color(t.bgTopLight, p * 0.85));
-        ctx.fillRect(new Rect(0, heroH - fadeH + i, W, 2));
-      }
-    }
 
     // ---- 标题 ----
     ctx.setTextAlignedCenter();
@@ -1287,10 +1364,11 @@ const PosterPainter = {
       ctx.drawTextInRect(c[2], new Rect(cx, cy + 98, cellW, 30));
     });
 
-    // ---- 大日历：每格四类明细 ----
+    // ---- 大日历：每格四类明细（有照片的日子用照片做底图） ----
     const cal = HeatmapPainter.paintMonthDetail(state, r.year, r.month, {
       ...calOpts,
       dark: false,
+      photos,
     });
     ctx.drawImageInRect(cal, new Rect((W - cm.w) / 2, L.cal, cm.w, cm.h));
 
@@ -1612,12 +1690,19 @@ const ReportView = {
     const table = new UITable();
     table.showSeparators = true;
 
+    // 当月每日照片。解码后可能有十几 MB，只在换月时重载一次，不跟着 render 走
+    let photos = await Store.loadMonthPhotos(year, month);
+    const reloadPhotos = async () => {
+      photos = await Store.loadMonthPhotos(year, month);
+    };
+
     const render = () => {
       const t = theme();
       const primary = new Color(t.primaryLight);
       const secondary = new Color(t.secondaryLight);
       const dark = Device.isUsingDarkAppearance();
       const r = Stats.monthReport(state, year, month);
+      const photoCount = Object.keys(photos).length;
 
       table.removeAllRows();
 
@@ -1647,6 +1732,7 @@ const ReportView = {
         const picked = await this._pickMonth(state);
         if (picked) {
           [year, month] = picked.split("-").map(Number);
+          await reloadPhotos();
           render();
         }
       };
@@ -1708,10 +1794,13 @@ const ReportView = {
       heatRow.height = 340;
       heatRow.dismissOnSelect = false;
       heatRow.addImage(
-        HeatmapPainter.paintMonth(state, r.year, r.month, { dark })
+        HeatmapPainter.paintMonth(state, r.year, r.month, {
+          dark,
+          photoKeys: Store.monthPhotoKeys(r.year, r.month),
+        })
       ).centerAligned();
       heatRow.onSelect = async () => {
-        await QuickLook.present(this._detailImage(state, r, dark), true);
+        await QuickLook.present(this._detailImage(state, r, dark, photos), true);
       };
       table.addRow(heatRow);
 
@@ -1720,65 +1809,34 @@ const ReportView = {
       hintRow.dismissOnSelect = false;
       const hint = hintRow.addText(
         "👆  点日历看四类明细大图",
-        "每格分开显示 💬 文字 / 🎙 语音 / 🖼 图片 / 😝 表情"
+        photoCount > 0
+          ? `每格四类明细 · 本月 ${photoCount} 天配了照片`
+          : "每格分开显示 💬 文字 / 🎙 语音 / 🖼 图片 / 😝 表情"
       );
       hint.titleFont = Font.mediumSystemFont(14);
       hint.titleColor = primary;
       hint.subtitleFont = Font.systemFont(11);
       hint.subtitleColor = secondary;
       hintRow.onSelect = async () => {
-        await QuickLook.present(this._detailImage(state, r, dark), true);
+        await QuickLook.present(this._detailImage(state, r, dark, photos), true);
       };
       table.addRow(hintRow);
-
-      // ---- 海报照片 ----
-      const photoRow = new UITableRow();
-      photoRow.height = 48;
-      photoRow.dismissOnSelect = false;
-      const photoCell = photoRow.addText(
-        "🖼  海报照片",
-        Store.hasPosterPhoto()
-          ? "已设置 · 显示在海报顶部通栏"
-          : "选一张爱豆照片，做海报顶图（横图效果最好）"
-      );
-      photoCell.titleFont = Font.mediumSystemFont(16);
-      photoCell.subtitleFont = Font.systemFont(12);
-      photoCell.subtitleColor = secondary;
-      photoRow.onSelect = async () => {
-        const a = new Alert();
-        a.title = "海报照片";
-        a.message = "会居中裁成 1080x640 的通栏比例";
-        a.addAction("从相册选择");
-        if (Store.hasPosterPhoto()) a.addDestructiveAction("移除照片");
-        a.addCancelAction("取消");
-        const idx = await a.presentAlert();
-        if (idx === 0) {
-          try {
-            const img = await Photos.fromLibrary();
-            if (img) Store.savePosterPhoto(img);
-          } catch (e) { /* 用户取消选择 */ }
-        } else if (idx === 1) {
-          Store.removePosterPhoto();
-        }
-        render();
-      };
-      table.addRow(photoRow);
 
       // ---- 导出海报 ----
       const posterRow = new UITableRow();
       posterRow.height = 52;
       posterRow.dismissOnSelect = false;
-      const pc = posterRow.addText("📤  生成月报海报", "1080px 竖图，可预览、存相册或分享");
+      const pc = posterRow.addText("📤  生成月报海报", "1200px 竖图，可预览、存相册或分享");
       pc.titleFont = Font.semiboldSystemFont(16);
       pc.titleColor = primary;
       pc.subtitleFont = Font.systemFont(12);
       pc.subtitleColor = secondary;
       posterRow.onSelect = async () => {
-        const photo = await Store.loadPosterPhoto();
-        const img = PosterPainter.paintMonthReport(state, r, photo);
+        const img = PosterPainter.paintMonthReport(state, r, photos);
         const a = new Alert();
         a.title = "月报海报已生成";
-        a.message = `${r.year} 年 ${r.month} 月${photo ? "" : "\n（还没设置照片，海报没有顶图）"}`;
+        a.message = `${r.year} 年 ${r.month} 月` +
+          (photoCount > 0 ? `\n${photoCount} 天的照片已铺进日历` : "");
         a.addAction("预览");
         a.addAction("分享");
         a.addAction("存入相册");
@@ -1802,9 +1860,9 @@ const ReportView = {
   },
 
   /** 全屏看的四类明细大日历（按海报同款尺寸出图，保证清晰） */
-  _detailImage(state, r, dark) {
+  _detailImage(state, r, dark, photos) {
     return HeatmapPainter.paintMonthDetail(state, r.year, r.month, {
-      cellW: 126, cellH: 100, gap: 8, pad: 12, dark,
+      gap: 8, pad: 12, dark, photos,
     });
   },
 
@@ -1946,6 +2004,42 @@ const PanelView = {
         }
       };
       table.addRow(editRow);
+
+      // ---- 这天的照片（补记面板同样可用，所以放在 isToday 判断之外） ----
+      const dayPhotoRow = new UITableRow();
+      dayPhotoRow.height = 48;
+      dayPhotoRow.dismissOnSelect = false;
+      const hasPhoto = Store.hasDayPhoto(targetDate);
+      const dpCell = dayPhotoRow.addText(
+        "📷  这天的照片",
+        hasPhoto ? "已设置 · 会铺在月报日历这一格里" : "选一张，作为月报日历这天的底图"
+      );
+      dpCell.titleFont = Font.mediumSystemFont(16);
+      dpCell.subtitleFont = Font.systemFont(12);
+      dpCell.subtitleColor = secondary;
+      dayPhotoRow.onSelect = async () => {
+        const a = new Alert();
+        a.title = `${targetDate} 的照片`;
+        a.message = "会居中裁成日历格的比例，只在月报的明细日历和海报上显示";
+        a.addAction("从相册选择");
+        if (hasPhoto) a.addAction("查看");
+        if (hasPhoto) a.addDestructiveAction("移除照片");
+        a.addCancelAction("取消");
+        const idx = await a.presentAlert();
+        if (idx === 0) {
+          try {
+            const img = await Photos.fromLibrary();
+            if (img) Store.saveDayPhoto(targetDate, img);
+          } catch (e) { /* 用户取消选择 */ }
+        } else if (hasPhoto && idx === 1) {
+          const img = Store.fm().readImage(Store.dayPhotoPath(targetDate));
+          if (img) await QuickLook.present(img, true);
+        } else if (hasPhoto && idx === 2) {
+          Store.removeDayPhoto(targetDate);
+        }
+        render();
+      };
+      table.addRow(dayPhotoRow);
 
       // ---- 补记入口（仅主面板显示，避免套娃） ----
       if (isToday) {
@@ -2100,8 +2194,10 @@ const PanelView = {
       const heatRow = new UITableRow();
       heatRow.height = 340; // 格子放大到 36px 装条数后，6 行月份需要更高的行
       heatRow.dismissOnSelect = false;
+      const nowM = new Date();
       const img = HeatmapPainter.paintCurrentMonth(state, {
         dark: Device.isUsingDarkAppearance(),
+        photoKeys: Store.monthPhotoKeys(nowM.getFullYear(), nowM.getMonth() + 1),
       });
       const imgCell = heatRow.addImage(img);
       imgCell.centerAligned();

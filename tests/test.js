@@ -292,16 +292,27 @@ function assertEq(actual, expected, msg) {
   assertEq(mixHex("#000000", "#ffffff", 0.5), "#808080", "渐变插值取中间色");
 
   console.log("== 四类明细大日历 ==");
+  const CW = HeatmapPainter.DETAIL_CELL_W;
+  const CH = HeatmapPainter.DETAIL_CELL_H;
   const dm = HeatmapPainter.detailMetrics(2020, 3, {});
   assertEq(dm.rows, 5, "明细日历行数与紧凑版一致");
-  assertEq(dm.w, 930, "默认明细日历宽度（126x7 + 8x6）");
-  assertEq(dm.h, 44 + 5 * 100 + 4 * 8, "默认明细日历高度（星期行 + 5 行格子 + 行距）");
-  // 海报按内容宽度反推格宽，必须刚好塞进 1080-72*2 的版心
-  const posterCellW = Math.floor((PosterPainter.W - PosterPainter.padX * 2 - 6 * 8) / 7);
-  const pm = HeatmapPainter.detailMetrics(2020, 3, { cellW: posterCellW, cellH: 100, gap: 8, pad: 0 });
+  assertEq(dm.cellW, CW, "格宽取 DETAIL_CELL_W");
+  assertEq(dm.w, CW * 7 + 8 * 6, "默认明细日历宽度");
+  assertEq(dm.h, dm.headerH + 5 * CH + 4 * 8, "默认明细日历高度（星期行 + 5 行格子 + 行距）");
+  // 海报按日历版心反推格宽，必须刚好塞得下
+  const calInner = PosterPainter.W - PosterPainter.calPad * 2;
+  const posterCellW = Math.floor((calInner - 6 * 8) / 7);
+  const pm = HeatmapPainter.detailMetrics(2020, 3, { cellW: posterCellW, cellH: CH, gap: 8, pad: 0 });
+  assert(pm.w <= calInner, `明细日历不超出海报版心（${pm.w} <= ${calInner}）`);
   assert(
-    pm.w <= PosterPainter.W - PosterPainter.padX * 2,
-    `明细日历不超出海报版心（${pm.w} <= ${PosterPainter.W - PosterPainter.padX * 2}）`
+    posterCellW >= CW,
+    `海报格宽不小于默认值，日历是可视化主体（${posterCellW} >= ${CW}）`
+  );
+  // 每日照片按 2 倍格子尺寸存盘，比例必须和格子一致，否则贴上去会变形或留黑边
+  assertEq(
+    (CW * 2) / (CH * 2),
+    CW / CH,
+    "每日照片裁切比例与日历格一致"
   );
   assertEq(HeatmapPainter.levelHex(0, [2, 4, 7]), null, "0 条没有档位色");
   assertEq(
@@ -312,7 +323,7 @@ function assertEq(actual, expected, msg) {
   // 6 行的月份（2020-05：5/1 是周五，31 天 → 6 行）要能撑开高度
   const dm6 = HeatmapPainter.detailMetrics(2020, 5, {});
   assertEq(dm6.rows, 6, "2020 年 5 月为 6 行");
-  assertEq(dm6.h, 44 + 6 * 100 + 5 * 8, "6 行月份高度正确");
+  assertEq(dm6.h, dm6.headerH + 6 * CH + 5 * 8, "6 行月份高度正确");
 
   console.log("== 备份与损坏恢复 ==");
   // 上面多次 save 已产生备份；现在写坏主文件

@@ -62,10 +62,13 @@ const source = fs
 
 const loadModule = new Function(
   source +
-    "\n;return { CONFIG, Store, Stats, HeatmapPainter, dateKey, todayKey, isValidDateKey, keyToDate, daysBetween };"
+    "\n;return { CONFIG, Store, Stats, HeatmapPainter, ReportText, dateKey, todayKey," +
+    " isValidDateKey, keyToDate, daysBetween, mixHex };"
 );
-const { CONFIG, Store, Stats, HeatmapPainter, dateKey, todayKey, isValidDateKey, keyToDate, daysBetween } =
-  loadModule();
+const {
+  CONFIG, Store, Stats, HeatmapPainter, ReportText,
+  dateKey, todayKey, isValidDateKey, keyToDate, daysBetween, mixHex,
+} = loadModule();
 
 // ---------- 断言工具 ----------
 
@@ -218,6 +221,87 @@ function assertEq(actual, expected, msg) {
   const themed = await Store.mutate((s) => { s.config.theme = "blue"; });
   assertEq(themed.config.theme, "blue", "主题选择持久化到 state.config.theme");
   await Store.mutate((s) => { s.config.theme = "pink"; });
+
+  console.log("== 月度统计 ==");
+  // 固定用 2020 年的数据，避免断言随运行日期漂移
+  const sm = {
+    config: { idolName: "OO", startDate: "2020-01-01", theme: "pink" },
+    days: {
+      "2020-02-10": { text: 10, voice: 0, image: 0, emoji: 0 },
+      "2020-03-01": { text: 2, voice: 0, image: 0, emoji: 0 },
+      "2020-03-02": { text: 1, voice: 2, image: 0, emoji: 0 },
+      "2020-03-03": { text: 0, voice: 1, image: 0, emoji: 0 },
+      "2020-03-05": { text: 0, voice: 0, image: 3, emoji: 0 },
+      "2020-03-20": { text: 0, voice: 9, image: 0, emoji: 0 },
+    },
+    totals: { text: 0, voice: 0, image: 0, emoji: 0 },
+    lastAction: null,
+  };
+  Store.rebuildTotals(sm);
+
+  assertEq(Stats.monthKey(2020, 3), "2020-03", "monthKey 补零");
+  assertEq(
+    Stats.monthCounts(sm, 2020, 3),
+    { text: 3, voice: 12, image: 3, emoji: 0 },
+    "monthCounts 只统计目标月"
+  );
+  assertEq(Stats.availableMonths(sm), ["2020-03", "2020-02"], "availableMonths 倒序");
+  assertEq(
+    Stats.monthStreak(sm, 2020, 3),
+    { days: 3, from: "2020-03-01", to: "2020-03-03" },
+    "monthStreak 找到最长连续段"
+  );
+  assertEq(Stats.monthStreak(sm, 2020, 2), { days: 1, from: "2020-02-10", to: "2020-02-10" }, "单天也算 1 连击");
+  assertEq(Stats.monthStreak(sm, 2020, 5), { days: 0, from: null, to: null }, "空月份连击为 0");
+  assertEq(Stats.monthPeakDay(sm, 2020, 3), { key: "2020-03-20", total: 9 }, "monthPeakDay 取最高日");
+  assert(Stats.monthPeakDay(sm, 2020, 5) === null, "空月份无峰值日");
+
+  const r = Stats.monthReport(sm, 2020, 3);
+  assertEq(r.total, 18, "月报总条数");
+  assertEq(r.prevTotal, 10, "月报上月总数");
+  assertEq(r.momPct, 80, "月报环比百分比");
+  assertEq(r.elapsedDays, 31, "已结束的月份按整月天数算");
+  assertEq(r.activeDays, 5, "有泡泡的天数");
+  assertEq(r.activeRate, 16, "打卡率 = 5/31");
+  assertEq(r.dayAvg, 0.6, "日均保留一位小数");
+  assertEq(r.topType, "voice", "类型偏好取条数最多的一类");
+  assertEq(r.rank, 1, "18 条是记录中最高的月份");
+  assertEq(r.monthsWithData, 2, "有记录的月份数");
+  assert(r.isCurrent === false, "2020-03 不是当月");
+
+  // 跨年回退：2020-01 的上一月应为 2019-12
+  const rJan = Stats.monthReport(sm, 2020, 1);
+  assertEq(rJan.prevTotal, 0, "1 月的上月回退到去年 12 月（无数据为 0）");
+  assertEq(rJan.momPct, null, "上月为 0 时环比为 null 而非 Infinity");
+
+  // 当月口径：elapsed 用已过天数，不用整月天数
+  const nowM = new Date();
+  const rCur = Stats.monthReport(sm, nowM.getFullYear(), nowM.getMonth() + 1);
+  assert(rCur.isCurrent === true, "当月被识别为进行中");
+  assertEq(rCur.elapsedDays, nowM.getDate(), "当月按已过天数计算，月初不会被稀释");
+
+  console.log("== 月报文案 ==");
+  const lines = ReportText.compose(sm, r);
+  assert(Array.isArray(lines) && lines.length > 0, "文案生成为非空数组");
+  assert(lines[0].includes("18"), "首句包含本月总条数");
+  assert(lines.some((l) => l.includes("80%")), "文案提到环比");
+  assert(lines.some((l) => l.includes("3 天")), "文案提到最长连击");
+  assert(lines.some((l) => l.includes("3月20日")), "文案提到峰值日");
+  assert(lines.some((l) => l.includes("语音")), "文案提到类型偏好");
+  const emptyLines = ReportText.compose(sm, Stats.monthReport(sm, 2020, 5));
+  assert(emptyLines.length > 0, "空月份也有兜底文案");
+  assert(!emptyLines.some((l) => l.includes("NaN")), "空月份文案无 NaN");
+
+  console.log("== 月历排版尺寸 ==");
+  // 2020-03-01 是周日，31 天 → 5 行
+  const hm = HeatmapPainter.monthMetrics(2020, 3, {});
+  assertEq(hm.rows, 5, "2020 年 3 月为 5 行");
+  assertEq(hm.cell, 36, "默认格子放大到 36（要装下条数 + 日期角标）");
+  assertEq(hm.w, 298, "月历宽度（iPhone SE 上不会被压缩）");
+  assertEq(hm.h, 281, "月历高度含星期行与页脚");
+  const hmNoFooter = HeatmapPainter.monthMetrics(2020, 3, { showFooter: false });
+  assertEq(hmNoFooter.h, 247, "关掉页脚少 34pt");
+  assertEq(mixHex("#000000", "#ffffff", 0.5), "#808080", "渐变插值取中间色");
 
   console.log("== 备份与损坏恢复 ==");
   // 上面多次 save 已产生备份；现在写坏主文件

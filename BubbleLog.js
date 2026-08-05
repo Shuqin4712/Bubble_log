@@ -79,6 +79,24 @@ function theme() {
   return CONFIG.theme[CONFIG.themeName] || CONFIG.theme.pink;
 }
 
+/** "#RRGGBB" → [r, g, b] */
+function hexToRgb(hex) {
+  const s = hex.replace("#", "");
+  return [
+    parseInt(s.slice(0, 2), 16),
+    parseInt(s.slice(2, 4), 16),
+    parseInt(s.slice(4, 6), 16),
+  ];
+}
+
+/** 两个 hex 按比例 p(0~1) 混合，返回 "#RRGGBB"。DrawContext 没有渐变 API，靠它逐条插值 */
+function mixHex(a, b, p) {
+  const ca = hexToRgb(a);
+  const cb = hexToRgb(b);
+  const out = ca.map((v, i) => Math.round(v + (cb[i] - v) * p));
+  return "#" + out.map((v) => v.toString(16).padStart(2, "0")).join("");
+}
+
 // ============================================================
 // 日期工具
 // ============================================================
@@ -520,6 +538,123 @@ const Stats = {
     const pct = Math.round(((cur - prev) / prev) * 100);
     return (pct >= 0 ? "+" : "") + pct + "%";
   },
+
+  // ---------- 月报用统计（month 参数一律 1~12） ----------
+
+  /** "YYYY-MM" */
+  monthKey(year, month) {
+    return `${year}-${String(month).padStart(2, "0")}`;
+  },
+
+  /** 某月四类计数合计 */
+  monthCounts(state, year, month) {
+    const prefix = this.monthKey(year, month) + "-";
+    const sum = { text: 0, voice: 0, image: 0, emoji: 0 };
+    for (const key of Object.keys(state.days)) {
+      if (!key.startsWith(prefix)) continue;
+      for (const t of CONFIG.types) sum[t] += state.days[key][t] || 0;
+    }
+    return sum;
+  },
+
+  /** 有记录的月份列表，"YYYY-MM" 倒序（最新在前） */
+  availableMonths(state) {
+    const set = {};
+    for (const key of Object.keys(state.days)) {
+      if (this.dayTotal(state.days[key]) > 0) set[key.slice(0, 7)] = true;
+    }
+    return Object.keys(set).sort().reverse();
+  },
+
+  /** 某月最长连续有泡泡的天数：{ days, from, to }，无记录时 days 为 0 */
+  monthStreak(state, year, month) {
+    const daysInMonth = new Date(year, month, 0).getDate();
+    let best = { days: 0, from: null, to: null };
+    let runStart = null;
+    let runLen = 0;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const key = `${this.monthKey(year, month)}-${String(d).padStart(2, "0")}`;
+      if (this.dayTotal(this.dayCounts(state, key)) > 0) {
+        if (runLen === 0) runStart = key;
+        runLen++;
+        if (runLen > best.days) best = { days: runLen, from: runStart, to: key };
+      } else {
+        runLen = 0;
+      }
+    }
+    return best;
+  },
+
+  /** 某月条数最多的一天：{ key, total } 或 null */
+  monthPeakDay(state, year, month) {
+    const prefix = this.monthKey(year, month) + "-";
+    let best = null;
+    for (const key of Object.keys(state.days)) {
+      if (!key.startsWith(prefix)) continue;
+      const total = this.dayTotal(state.days[key]);
+      if (total > 0 && (!best || total > best.total)) best = { key, total };
+    }
+    return best;
+  },
+
+  /**
+   * 月报数据包：一次算齐报告页和海报要用的全部指标。
+   *
+   * 口径说明：当月尚未过完时，「打卡率」和「日均」按已过天数算，
+   * 不拿月初几天去除整月天数，否则月初看起来永远很惨。
+   */
+  monthReport(state, year, month) {
+    const key = this.monthKey(year, month);
+    const now = new Date();
+    const isCurrent = year === now.getFullYear() && month === now.getMonth() + 1;
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const elapsed = isCurrent ? now.getDate() : daysInMonth;
+
+    const counts = this.monthCounts(state, year, month);
+    const total = this.dayTotal(counts);
+
+    // 上一个月（跨年时回退到去年 12 月）
+    const prevDate = new Date(year, month - 2, 1);
+    const prevTotal = this.dayTotal(
+      this.monthCounts(state, prevDate.getFullYear(), prevDate.getMonth() + 1)
+    );
+
+    // 有泡泡的天数
+    const prefix = key + "-";
+    let activeDays = 0;
+    for (const k of Object.keys(state.days)) {
+      if (k.startsWith(prefix) && this.dayTotal(state.days[k]) > 0) activeDays++;
+    }
+
+    // 在所有有记录月份里的排名（按总条数降序，1 = 最高）
+    const months = this.availableMonths(state).map((mk) => {
+      const [y, m] = mk.split("-").map(Number);
+      return { key: mk, total: this.dayTotal(this.monthCounts(state, y, m)) };
+    });
+    months.sort((a, b) => b.total - a.total);
+    const rankIdx = months.findIndex((m) => m.key === key);
+
+    // 类型偏好：条数最多的那一类
+    let topType = null;
+    for (const t of CONFIG.types) {
+      if (counts[t] > 0 && (!topType || counts[t] > counts[topType])) topType = t;
+    }
+
+    return {
+      key, year, month, isCurrent,
+      daysInMonth, elapsedDays: elapsed,
+      counts, total, prevTotal,
+      momPct: prevTotal === 0 ? null : Math.round(((total - prevTotal) / prevTotal) * 100),
+      activeDays,
+      activeRate: elapsed > 0 ? Math.round((activeDays / elapsed) * 100) : 0,
+      dayAvg: elapsed > 0 ? Math.round((total / elapsed) * 10) / 10 : 0,
+      peakDay: this.monthPeakDay(state, year, month),
+      streak: this.monthStreak(state, year, month),
+      topType,
+      rank: rankIdx >= 0 ? rankIdx + 1 : null,
+      monthsWithData: months.length,
+    };
+  },
 };
 
 // ============================================================
@@ -614,33 +749,54 @@ const HeatmapPainter = {
     return ctx.getImage();
   },
 
+  /** 画当月日历热力图（薄封装，见 paintMonth） */
+  paintCurrentMonth(state, opts) {
+    const now = new Date();
+    return this.paintMonth(state, now.getFullYear(), now.getMonth() + 1, opts);
+  },
+
   /**
-   * 画当月日历式热力图（7 列 周日~周六 x 最多 6 行），返回 Image。
+   * 画指定月份的日历式热力图（7 列 周日~周六 x 最多 6 行），返回 Image。
+   *
+   * 格子中央是当天总条数（0 条留空），日期缩为左上角角标——
+   * 条数才是要读的信息，日期只用来定位，参照 iOS 日历「日期在角、内容在中」。
+   *
    * DrawContext 出图是静态位图，Color.dynamic 不生效，
    * 深浅色由调用方传 opts.dark（用 Device.isUsingDarkAppearance() 判断）。
    *
+   * @param {number} year 四位年份
+   * @param {number} month 1~12
    * opts：dark 深色模式取色；cell/gap/pad 格子尺寸；
    *       showFooter 是否在图内标注当月总条数（组件里改用组件文字，传 false）
    */
-  paintCurrentMonth(state, opts) {
+  /** 月历网格的排版尺寸（画之前就要知道 w/h，海报排版用） */
+  monthMetrics(year, monthNo, opts) {
     opts = opts || {};
-    const dark = !!opts.dark;
-    const t = theme();
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = now.getMonth(); // 0-based
+    const month = monthNo - 1;
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     const firstWeekday = new Date(year, month, 1).getDay(); // 0 = 周日
     const rows = Math.ceil((firstWeekday + daysInMonth) / 7);
-
-    const cell = opts.cell || 30;
-    const gap = opts.gap || 7;
-    const pad = opts.pad != null ? opts.pad : 10;
+    // 格子要同时容下「中央条数 + 左上角日期」，比纯色块版本大一号
+    const cell = opts.cell || 36;
+    const gap = opts.gap || 5;
+    const pad = opts.pad != null ? opts.pad : 8;
     const headerH = Math.round(cell * 0.85); // 星期标签行
+    const footerH = opts.showFooter !== false ? 34 : 0;
+    return {
+      month, daysInMonth, firstWeekday, rows, cell, gap, pad, headerH, footerH,
+      w: pad * 2 + cell * 7 + gap * 6,
+      h: pad * 2 + headerH + rows * cell + (rows - 1) * gap + footerH,
+    };
+  },
+
+  paintMonth(state, year, monthNo, opts) {
+    opts = opts || {};
+    const dark = !!opts.dark;
+    const t = theme();
     const showFooter = opts.showFooter !== false;
-    const footerH = showFooter ? 34 : 0;     // 当月总条数
-    const w = pad * 2 + cell * 7 + gap * 6;
-    const h = pad * 2 + headerH + rows * cell + (rows - 1) * gap + footerH;
+    const {
+      month, daysInMonth, firstWeekday, cell, gap, pad, headerH, footerH, w, h,
+    } = this.monthMetrics(year, monthNo, opts);
 
     const labelColor = new Color(dark ? t.secondaryDark : t.secondaryLight);
 
@@ -662,9 +818,8 @@ const HeatmapPainter = {
     // 日期格子
     const tKey = todayKey();
     const bounds = Stats.heatBoundaries(state);
-    const dayFont = Math.round(cell * 0.37);
+    const dateFont = Math.max(8, Math.round(cell * 0.24)); // 左上角角标
     const corner = Math.round(cell * 0.23);
-    ctx.setFont(Font.mediumSystemFont(dayFont));
     for (let day = 1; day <= daysInMonth; day++) {
       const idx = firstWeekday + day - 1;
       const col = idx % 7;
@@ -692,17 +847,39 @@ const HeatmapPainter = {
         ctx.strokePath();
       }
 
-      // 日期数字：深色档用白字；浅粉档固定深字保证对比度；空格随模式
-      if (level >= 2) ctx.setTextColor(Color.white());
-      else if (level >= 0) ctx.setTextColor(new Color(t.secondaryLight));
+      // 左上角日期角标：深色档上用半透明白，浅色档用次级色，空格随深浅模式
+      ctx.setTextAlignedLeft();
+      ctx.setFont(Font.regularSystemFont(dateFont));
+      if (level >= 2) ctx.setTextColor(new Color("#FFFFFF", 0.7));
+      else if (level >= 0) ctx.setTextColor(new Color(t.secondaryLight, 0.85));
       else ctx.setTextColor(labelColor);
-      const textH = dayFont + 3;
-      ctx.drawTextInRect(String(day), new Rect(x, y + (cell - textH) / 2, cell, textH));
+      ctx.drawTextInRect(
+        String(day),
+        new Rect(x + 3, y + 1, cell - 6, dateFont + 3)
+      );
+
+      // 中央条数：0 条留空，让「哪天有泡泡」的轮廓保持干净
+      if (count > 0) {
+        // DrawContext 没有 minimumScaleFactor，3 位数只能自己缩字号
+        const countFont = count >= 100
+          ? Math.round(cell * 0.3)
+          : Math.round(cell * 0.42);
+        const countH = countFont + 3;
+        ctx.setTextAlignedCenter();
+        ctx.setFont(Font.boldSystemFont(countFont));
+        ctx.setTextColor(level >= 2 ? Color.white() : new Color(t.secondaryLight));
+        // 往下挪 3pt，给顶部角标让出位置（视觉重心仍接近格子中心）
+        ctx.drawTextInRect(
+          String(count),
+          new Rect(x, y + (cell - countH) / 2 + 3, cell, countH)
+        );
+      }
     }
 
     // 当月总条数
     if (showFooter) {
-      const monthSum = Stats.monthTotal(state, 0);
+      const monthSum = Stats.dayTotal(Stats.monthCounts(state, year, month + 1));
+      ctx.setTextAlignedCenter();
       ctx.setFont(Font.semiboldSystemFont(14));
       ctx.setTextColor(new Color(dark ? t.primaryDark : t.heatText));
       ctx.drawTextInRect(
@@ -726,9 +903,18 @@ const RingPainter = {
    * 文字/语音/图片/表情）。DrawContext 没有圆弧 API，用密集打点画环。
    */
   paintTotalsRing(state, opts) {
+    return this.paintRing(state.totals, Object.assign({ caption: "累计泡泡" }, opts));
+  },
+
+  /**
+   * @param {object} counts 四类计数 { text, voice, image, emoji }
+   * opts：dark 深色取色；size 边长；caption 环心下方说明文字
+   */
+  paintRing(counts, opts) {
     opts = opts || {};
     const dark = !!opts.dark;
     const size = opts.size || 190;
+    const caption = opts.caption || "累计泡泡";
     const t = theme();
 
     const ctx = new DrawContext();
@@ -740,7 +926,7 @@ const RingPainter = {
     const cy = size / 2;
     const thickness = Math.round(size * 0.11);
     const radius = size / 2 - thickness / 2 - 2;
-    const grand = Stats.grandTotal(state);
+    const grand = Stats.dayTotal(counts);
 
     const drawDot = (deg, color) => {
       const rad = (deg * Math.PI) / 180;
@@ -759,7 +945,7 @@ const RingPainter = {
     } else {
       let start = -90; // 12 点方向起
       CONFIG.types.forEach((tp, i) => {
-        const span = (360 * state.totals[tp]) / grand;
+        const span = (360 * (counts[tp] || 0)) / grand;
         const color = new Color(t.heatLevels[i]);
         for (let d = start; d < start + span; d += step) drawDot(d, color);
         start += span;
@@ -776,7 +962,198 @@ const RingPainter = {
     );
     ctx.setFont(Font.mediumSystemFont(Math.round(size * 0.065)));
     ctx.setTextColor(new Color(dark ? t.secondaryDark : t.secondaryLight));
-    ctx.drawTextInRect("累计泡泡", new Rect(0, cy + size * 0.07, size, size * 0.1));
+    ctx.drawTextInRect(caption, new Rect(0, cy + size * 0.07, size, size * 0.1));
+
+    return ctx.getImage();
+  },
+};
+
+// ============================================================
+// ReportText — 月报文案（规则模板，纯本地、永远可用）
+// ============================================================
+
+const ReportText = {
+  /** 日期 key → "7月14日" */
+  _cn(key) {
+    const [, m, d] = key.split("-").map(Number);
+    return `${m}月${d}日`;
+  },
+
+  /**
+   * 把 monthReport 的数字翻译成几句话，返回字符串数组（一行一句）。
+   * 这是兜底实现：没网、没配 API key、请求失败时月报都靠它，
+   * 所以这里不允许有任何外部依赖。
+   */
+  compose(state, r) {
+    const name = state.config.idolName;
+    const lines = [];
+
+    if (r.total === 0) {
+      lines.push(`${r.month} 月还没有记录下任何泡泡。`);
+      lines.push("从今天开始，收到就点一下吧 🫧");
+      return lines;
+    }
+
+    lines.push(`${r.month} 月，${name}给你发了 ${r.total} 条泡泡。`);
+
+    if (r.momPct === null) {
+      lines.push("这是有记录以来的第一个月。");
+    } else if (r.momPct > 0) {
+      lines.push(`比上个月多了 ${r.momPct}%，热度在往上走。`);
+    } else if (r.momPct < 0) {
+      lines.push(`比上个月少了 ${Math.abs(r.momPct)}%。`);
+    } else {
+      lines.push("和上个月一模一样，稳定得有点可爱。");
+    }
+
+    lines.push(
+      `${r.elapsedDays} 天里有 ${r.activeDays} 天收到了消息，打卡率 ${r.activeRate}%。`
+    );
+
+    if (r.streak.days >= 2) {
+      lines.push(`最长连着 ${r.streak.days} 天没有断过。`);
+    }
+
+    if (r.peakDay) {
+      lines.push(`${this._cn(r.peakDay.key)}最多，一口气 ${r.peakDay.total} 条。`);
+    }
+
+    if (r.topType) {
+      // 不用第三人称代词：爱豆性别未知，用昵称最稳妥
+      const meta = CONFIG.typeMeta[r.topType];
+      const pct = Math.round((r.counts[r.topType] / r.total) * 100);
+      lines.push(`发得最多的是${meta.label}，占了 ${pct}%。`);
+    }
+
+    if (r.rank === 1 && r.monthsWithData > 1) {
+      lines.push("这是订阅以来条数最多的一个月 🎉");
+    } else if (r.rank && r.rank <= 3 && r.monthsWithData > 3) {
+      lines.push(`在所有月份里排第 ${r.rank}。`);
+    }
+
+    return lines;
+  },
+};
+
+// ============================================================
+// PosterPainter — 月报海报图（可存相册 / 分享）
+// ============================================================
+
+const PosterPainter = {
+  /**
+   * 画一张竖版月报海报，返回 Image。
+   * 海报是给人截图分享的，固定用浅色配色（深色底发到聊天里容易糊），
+   * 所以内部一律传 dark: false。
+   */
+  paintMonthReport(state, r, lines) {
+    const t = theme();
+    const W = 620;
+    const padX = 44;
+
+    // 先量出热力图尺寸，才能定总高
+    const heatOpts = { cell: 64, gap: 8, pad: 0, showFooter: false };
+    const hm = HeatmapPainter.monthMetrics(r.year, r.month, heatOpts);
+
+    const ringSize = 230;
+    const gridRows = 2;
+    const statCellH = 82;
+    const lineH = 34;
+
+    let y = 0;
+    const layout = {};
+    y += 52;                       layout.title = y;   // 标题基线区起点
+    y += 46;                       layout.sub = y;
+    y += 46;                       layout.ring = y;
+    y += ringSize + 34;            layout.stats = y;
+    y += gridRows * statCellH + 26; layout.heat = y;
+    y += hm.h + 30;                layout.lines = y;
+    y += lines.length * lineH + 26; layout.footer = y;
+    const H = y + 56;
+
+    const ctx = new DrawContext();
+    ctx.size = new Size(W, H);
+    ctx.opaque = true;
+    ctx.respectScreenScale = true;
+
+    // 背景渐变：DrawContext 没有渐变 API，用横条逐行插值
+    const strip = 4;
+    for (let sy = 0; sy < H; sy += strip) {
+      ctx.setFillColor(new Color(mixHex(t.bgTopLight, t.bgBottomLight, sy / H)));
+      ctx.fillRect(new Rect(0, sy, W, strip));
+    }
+
+    const primary = new Color(t.primaryLight);
+    const secondary = new Color(t.secondaryLight);
+
+    // ---- 标题 ----
+    ctx.setTextAlignedCenter();
+    ctx.setFont(Font.boldSystemFont(34));
+    ctx.setTextColor(primary);
+    ctx.drawTextInRect(
+      `🫧 ${state.config.idolName} · ${r.year} 年 ${r.month} 月`,
+      new Rect(padX, layout.title, W - padX * 2, 44)
+    );
+
+    ctx.setFont(Font.mediumSystemFont(19));
+    ctx.setTextColor(secondary);
+    ctx.drawTextInRect(
+      `D+${Stats.dPlus(state)} · 累计 ${Stats.grandTotal(state)} 条`,
+      new Rect(padX, layout.sub, W - padX * 2, 28)
+    );
+
+    // ---- 四类占比环 ----
+    const ring = RingPainter.paintRing(r.counts, {
+      dark: false,
+      size: ringSize,
+      caption: `${r.month} 月泡泡`,
+    });
+    ctx.drawImageInRect(ring, new Rect((W - ringSize) / 2, layout.ring, ringSize, ringSize));
+
+    // ---- 关键指标 2x2 ----
+    const cells = [
+      ["打卡率", `${r.activeRate}%`, `${r.activeDays}/${r.elapsedDays} 天`],
+      ["最长连击", `${r.streak.days} 天`, r.streak.days > 0 ? "连续收到" : "还没连上"],
+      ["单日最高", r.peakDay ? `${r.peakDay.total} 条` : "—", r.peakDay ? ReportText._cn(r.peakDay.key) : "暂无"],
+      ["日均", `${r.dayAvg}`, r.momPct === null ? "首月" : `环比 ${r.momPct > 0 ? "+" : ""}${r.momPct}%`],
+    ];
+    const cellW = (W - padX * 2) / 2;
+    cells.forEach((c, i) => {
+      const cx = padX + (i % 2) * cellW;
+      const cy = layout.stats + Math.floor(i / 2) * statCellH;
+      ctx.setTextAlignedCenter();
+      ctx.setFont(Font.mediumSystemFont(15));
+      ctx.setTextColor(new Color(t.secondaryLight, 0.9));
+      ctx.drawTextInRect(c[0], new Rect(cx, cy, cellW, 22));
+      ctx.setFont(Font.heavySystemFont(30));
+      ctx.setTextColor(primary);
+      ctx.drawTextInRect(c[1], new Rect(cx, cy + 22, cellW, 38));
+      ctx.setFont(Font.regularSystemFont(14));
+      ctx.setTextColor(new Color(t.secondaryLight, 0.75));
+      ctx.drawTextInRect(c[2], new Rect(cx, cy + 58, cellW, 20));
+    });
+
+    // ---- 当月热力图 ----
+    const heat = HeatmapPainter.paintMonth(state, r.year, r.month, {
+      ...heatOpts,
+      dark: false,
+    });
+    ctx.drawImageInRect(heat, new Rect((W - hm.w) / 2, layout.heat, hm.w, hm.h));
+
+    // ---- 文案 ----
+    ctx.setTextAlignedCenter();
+    ctx.setFont(Font.mediumSystemFont(19));
+    ctx.setTextColor(new Color(t.primaryLight, 0.9));
+    lines.forEach((line, i) => {
+      ctx.drawTextInRect(
+        line,
+        new Rect(padX, layout.lines + i * lineH, W - padX * 2, lineH)
+      );
+    });
+
+    // ---- 落款 ----
+    ctx.setFont(Font.regularSystemFont(14));
+    ctx.setTextColor(new Color(t.secondaryLight, 0.6));
+    ctx.drawTextInRect("🫧 BubbleLog", new Rect(padX, layout.footer, W - padX * 2, 22));
 
     return ctx.getImage();
   },
@@ -1073,6 +1450,197 @@ const WidgetView = {
 };
 
 // ============================================================
+// ReportView — 月报页：UITable 明细 + 导出海报
+// ============================================================
+
+const ReportView = {
+  /** @param {string} monthKey "YYYY-MM"，缺省为当月 */
+  async present(monthKey) {
+    let { state } = await Store.load();
+    if (!state) return;
+
+    const now = new Date();
+    let [year, month] = monthKey
+      ? monthKey.split("-").map(Number)
+      : [now.getFullYear(), now.getMonth() + 1];
+
+    const table = new UITable();
+    table.showSeparators = true;
+
+    const render = () => {
+      const t = theme();
+      const primary = new Color(t.primaryLight);
+      const secondary = new Color(t.secondaryLight);
+      const r = Stats.monthReport(state, year, month);
+      const lines = ReportText.compose(state, r);
+
+      table.removeAllRows();
+
+      // ---- 头部 ----
+      const header = new UITableRow();
+      header.isHeader = true;
+      header.height = 54;
+      const hc = header.addText(
+        `📅 ${r.year} 年 ${r.month} 月报`,
+        `${state.config.idolName} · ${r.isCurrent ? "本月进行中" : "已完结"}`
+      );
+      hc.titleFont = Font.boldSystemFont(20);
+      hc.titleColor = primary;
+      hc.subtitleFont = Font.systemFont(12);
+      hc.subtitleColor = secondary;
+      table.addRow(header);
+
+      // ---- 换月 ----
+      const switchRow = new UITableRow();
+      switchRow.height = 46;
+      switchRow.dismissOnSelect = false;
+      const sc = switchRow.addText("🔀  换一个月看", "只列出有记录的月份");
+      sc.titleFont = Font.mediumSystemFont(16);
+      sc.subtitleFont = Font.systemFont(12);
+      sc.subtitleColor = secondary;
+      switchRow.onSelect = async () => {
+        const picked = await this._pickMonth(state);
+        if (picked) {
+          [year, month] = picked.split("-").map(Number);
+          render();
+        }
+      };
+      table.addRow(switchRow);
+
+      // ---- 四类占比环 ----
+      const ringRow = new UITableRow();
+      ringRow.height = 205;
+      ringRow.dismissOnSelect = false;
+      ringRow.addImage(
+        RingPainter.paintRing(r.counts, {
+          dark: Device.isUsingDarkAppearance(),
+          size: 190,
+          caption: `${r.month} 月泡泡`,
+        })
+      ).centerAligned();
+      table.addRow(ringRow);
+
+      const addRow = (title, subtitle) => {
+        const row = new UITableRow();
+        row.height = 46;
+        row.dismissOnSelect = false;
+        const cell = row.addText(title, subtitle);
+        cell.titleFont = Font.mediumSystemFont(15);
+        cell.subtitleFont = Font.systemFont(12);
+        cell.subtitleColor = secondary;
+        table.addRow(row);
+      };
+
+      // ---- 指标明细 ----
+      addRow(
+        `本月 ${r.total} 条 · 上月 ${r.prevTotal} 条`,
+        r.momPct === null
+          ? "上月无记录，暂无环比"
+          : `环比 ${r.momPct > 0 ? "+" : ""}${r.momPct}%`
+      );
+      addRow(
+        `打卡率 ${r.activeRate}%`,
+        `${r.elapsedDays} 天里有 ${r.activeDays} 天收到泡泡`
+      );
+      addRow(
+        r.streak.days > 0 ? `最长连击 ${r.streak.days} 天` : "还没有连续记录",
+        r.streak.days > 0 ? `${r.streak.from} → ${r.streak.to}` : "连着两天收到就会出现在这里"
+      );
+      addRow(
+        r.peakDay ? `单日最高 ${r.peakDay.total} 条` : "单日最高 —",
+        r.peakDay ? `出现在 ${r.peakDay.key}` : "本月暂无记录"
+      );
+      addRow(
+        CONFIG.types.map((tp) => `${CONFIG.typeMeta[tp].emoji} ${r.counts[tp]}`).join("　"),
+        `日均 ${r.dayAvg} 条` +
+          (r.rank ? ` · 月度排名第 ${r.rank}/${r.monthsWithData}` : "")
+      );
+
+      // ---- 文案 ----
+      const textHeader = new UITableRow();
+      textHeader.isHeader = true;
+      textHeader.height = 36;
+      const th = textHeader.addText("✍️ 这个月");
+      th.titleFont = Font.boldSystemFont(15);
+      th.titleColor = primary;
+      table.addRow(textHeader);
+
+      for (const line of lines) {
+        const row = new UITableRow();
+        row.height = 34;
+        row.dismissOnSelect = false;
+        const cell = row.addText(line);
+        cell.titleFont = Font.systemFont(14);
+        cell.titleColor = secondary;
+        table.addRow(row);
+      }
+
+      // ---- 当月热力图 ----
+      const heatRow = new UITableRow();
+      heatRow.height = 340;
+      heatRow.dismissOnSelect = false;
+      heatRow.addImage(
+        HeatmapPainter.paintMonth(state, r.year, r.month, {
+          dark: Device.isUsingDarkAppearance(),
+        })
+      ).centerAligned();
+      table.addRow(heatRow);
+
+      // ---- 导出海报 ----
+      const posterRow = new UITableRow();
+      posterRow.height = 52;
+      posterRow.dismissOnSelect = false;
+      const pc = posterRow.addText("📤  生成月报海报", "一张竖图，可存相册或直接分享");
+      pc.titleFont = Font.semiboldSystemFont(16);
+      pc.titleColor = primary;
+      pc.subtitleFont = Font.systemFont(12);
+      pc.subtitleColor = secondary;
+      posterRow.onSelect = async () => {
+        const img = PosterPainter.paintMonthReport(state, r, lines);
+        const a = new Alert();
+        a.title = "月报海报已生成";
+        a.message = `${r.year} 年 ${r.month} 月`;
+        a.addAction("分享");
+        a.addAction("存入相册");
+        a.addCancelAction("取消");
+        const idx = await a.presentAlert();
+        if (idx === 0) {
+          await ShareSheet.present([img]);
+        } else if (idx === 1) {
+          Photos.save(img);
+        }
+      };
+      table.addRow(posterRow);
+
+      table.reload();
+    };
+
+    render();
+    await table.present(false);
+  },
+
+  /** 月份选择：列出有记录的月份（最多 12 个），返回 "YYYY-MM" 或 null */
+  async _pickMonth(state) {
+    const now = new Date();
+    const curKey = Stats.monthKey(now.getFullYear(), now.getMonth() + 1);
+    let months = Stats.availableMonths(state);
+    if (!months.includes(curKey)) months.unshift(curKey); // 当月没记录也要能看
+    months = months.slice(0, 12);
+
+    const a = new Alert();
+    a.title = "选择月份";
+    for (const mk of months) {
+      const [y, m] = mk.split("-").map(Number);
+      const total = Stats.dayTotal(Stats.monthCounts(state, y, m));
+      a.addAction(`${y} 年 ${m} 月 · ${total} 条`);
+    }
+    a.addCancelAction("取消");
+    const idx = await a.presentSheet();
+    return idx === -1 ? null : months[idx];
+  },
+};
+
+// ============================================================
 // PanelView — 记录面板：UITable（四按钮 + 撤销 + 补记 + 统计区 + 热力图）
 // ============================================================
 
@@ -1266,6 +1834,25 @@ const PanelView = {
           render();
         };
         table.addRow(avatarRow);
+
+        // ---- 月报 ----
+        const reportRow = new UITableRow();
+        reportRow.height = 48;
+        reportRow.dismissOnSelect = false;
+        const reportCell = reportRow.addText(
+          "📅  月报",
+          "本月小结、打卡率、最长连击，可导出海报"
+        );
+        reportCell.titleFont = Font.mediumSystemFont(16);
+        reportCell.subtitleFont = Font.systemFont(12);
+        reportCell.subtitleColor = secondary;
+        reportRow.onSelect = async () => {
+          await ReportView.present();
+          const reloaded = await Store.load(); // 月报页可能什么都没改，但保险起见刷新
+          if (reloaded.state) state = reloaded.state;
+          render();
+        };
+        table.addRow(reportRow);
       }
 
       // ---- 统计区（只读） ----
@@ -1322,7 +1909,7 @@ const PanelView = {
 
       // ---- 月度热力图 ----
       const heatRow = new UITableRow();
-      heatRow.height = 250;
+      heatRow.height = 340; // 格子放大到 36px 装条数后，6 行月份需要更高的行
       heatRow.dismissOnSelect = false;
       const img = HeatmapPainter.paintCurrentMonth(state, {
         dark: Device.isUsingDarkAppearance(),

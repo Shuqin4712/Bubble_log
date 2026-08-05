@@ -1001,10 +1001,16 @@ const HeatmapPainter = {
 // 挂在 HeatmapPainter 上，共用 levelIndex / heatBoundaries 那套分档逻辑。
 
 Object.assign(HeatmapPainter, {
-  // 明细格默认尺寸。每日照片按 2 倍存盘（见 Store.saveDayPhoto），
-  // 改这里的话照片比例也要跟着改，否则旧照片贴上去会有黑边。
-  DETAIL_CELL_W: 154,
-  DETAIL_CELL_H: 140,
+  // 明细格默认尺寸，3:4 竖版——手机竖着拍的照片就是这个比例，
+  // 格子跟着照片走，贴上去才不会裁掉半个人。
+  // 每日照片按 2 倍存盘（见 Store.saveDayPhoto），改这里旧照片比例就对不上了。
+  DETAIL_CELL_W: 153,
+  DETAIL_CELL_H: 204,
+
+  /** 按 3:4 从格宽推格高。海报的格宽由版心反推，格高必须跟着算 */
+  detailCellH(cellW) {
+    return Math.round((cellW * this.DETAIL_CELL_H) / this.DETAIL_CELL_W);
+  },
 
   /** 条数 → 该档的色阶 hex（0 条返回 null），明细格要在此基础上调淡 */
   levelHex(count, bounds) {
@@ -1020,10 +1026,11 @@ Object.assign(HeatmapPainter, {
     const firstWeekday = new Date(year, month, 1).getDay();
     const rows = Math.ceil((firstWeekday + daysInMonth) / 7);
     const cellW = opts.cellW || this.DETAIL_CELL_W;
-    const cellH = opts.cellH || this.DETAIL_CELL_H;
+    const cellH = opts.cellH || this.detailCellH(cellW);
     const gap = opts.gap != null ? opts.gap : 8;
     const pad = opts.pad != null ? opts.pad : 0;
-    const headerH = Math.round(cellH * 0.44);
+    // 星期标签行按格「宽」算：格子拉成 3:4 之后，再按格高算会顶出一条空带
+    const headerH = Math.round(cellW * 0.34);
     return {
       month, daysInMonth, firstWeekday, rows, cellW, cellH, gap, pad, headerH,
       w: pad * 2 + cellW * 7 + gap * 6,
@@ -1073,9 +1080,11 @@ Object.assign(HeatmapPainter, {
       );
     });
 
+    // 格内字号一律按格「宽」算：横向才是紧的那一维（一行要塞下两组 emoji+数字），
+    // 按格高算的话 3:4 竖格会把字撑到放不下
     const tKey = todayKey();
-    const dateFont = Math.round(cellH * 0.19);
-    const entryFont = Math.round(cellH * 0.21);
+    const dateFont = Math.round(cellW * 0.19);
+    const baseEntryFont = Math.round(cellW * 0.185);
     const inset = Math.round(cellW * 0.06);
 
     for (let day = 1; day <= daysInMonth; day++) {
@@ -1133,11 +1142,16 @@ Object.assign(HeatmapPainter, {
 
       if (total === 0) continue; // 没记录的日子留空，不铺一堆 0
 
-      // 2x2 四类明细：顺序与 CONFIG.types 一致（文字/语音/图片/表情）
-      const gridTop = y + Math.round(cellH * 0.32);
-      const gridH = cellH - (gridTop - y) - Math.round(cellH * 0.06);
+      // 2x2 四类明细：顺序与 CONFIG.types 一致（文字/语音/图片/表情）。
+      // 贴着格子底部排，中间留给照片——竖格上半部分通常是脸
+      const maxCount = Math.max(...CONFIG.types.map((tp) => counts[tp]));
+      // 一行只有半格宽，3 位数放不下，按位数缩字号（DrawContext 没有自动缩放）
+      const entryFont = maxCount >= 100
+        ? Math.round(baseEntryFont * 0.72)
+        : baseEntryFont;
+      const rowH = entryFont + 10;
+      const gridTop = y + cellH - Math.round(cellH * 0.05) - rowH * 2;
       const colW = (cellW - inset * 2) / 2;
-      const rowH = gridH / 2;
       ctx.setTextAlignedLeft();
       ctx.setFont(Font.mediumSystemFont(entryFont));
       CONFIG.types.forEach((tp, i) => {
@@ -1250,6 +1264,36 @@ const PosterPainter = {
   padX: 90,   // 文字版心
   calPad: 36, // 日历版心：日历是可视化主体，留白比文字窄，格子尽量大
 
+  MAX_RATIO: 16 / 9, // 海报最高不超过 9:16，再长手机上就要滑好几屏
+
+  /**
+   * 海报版面尺寸。抽出来是为了能在不碰 DrawContext 的情况下断言比例——
+   * 日历格改成 3:4 之后纵向很吃紧，版面稍一放松就会捅破 9:16。
+   */
+  metrics(r) {
+    const W = this.W;
+    const gap = 8;
+    // 格宽由日历版心反推尽量占满，格高按 3:4 跟着算
+    const cellW = Math.floor((W - this.calPad * 2 - 6 * gap) / 7);
+    const calOpts = { cellW, cellH: HeatmapPainter.detailCellH(cellW), gap, pad: 0 };
+    const cm = HeatmapPainter.detailMetrics(r.year, r.month, calOpts);
+    const statRowH = 130;
+
+    // 自上而下堆版面，边堆边记录每块的 y。
+    // 四个指标从 2x2 改成一行 4 列、各段间距收紧，为拉长的日历腾出纵向空间
+    let y = 64;
+    const L = {};
+    L.title = y;    y += 66;
+    L.sub = y;      y += 74;
+    L.total = y;    y += 138;
+    L.caption = y;  y += 66;
+    L.types = y;    y += 84;
+    L.stats = y;    y += statRowH + 44;
+    L.cal = y;      y += cm.h + 40;
+    L.footer = y;
+    return { W, H: y + 70, L, calOpts, cm, statRowH };
+  },
+
   /**
    * 画一张竖版月报海报，返回 Image。
    * 海报是给人分享出去的，固定用浅色配色（深色底发到聊天里容易糊）。
@@ -1259,33 +1303,9 @@ const PosterPainter = {
    */
   paintMonthReport(state, r, photos) {
     const t = theme();
-    const W = this.W;
+    const { W, H, L, calOpts, cm, statRowH } = this.metrics(r);
     const padX = this.padX;
     const innerW = W - padX * 2;
-
-    // 先量出日历尺寸，才能定总高。格宽由版心反推，尽量占满
-    const gap = 8;
-    const calOpts = {
-      cellW: Math.floor((W - this.calPad * 2 - 6 * gap) / 7),
-      cellH: HeatmapPainter.DETAIL_CELL_H,
-      gap,
-      pad: 0,
-    };
-    const cm = HeatmapPainter.detailMetrics(r.year, r.month, calOpts);
-    const statRowH = 130;
-
-    // 自上而下堆版面，边堆边记录每块的 y
-    let y = 84;
-    const L = {};
-    L.title = y;    y += 70;
-    L.sub = y;      y += 86;
-    L.total = y;    y += 150;
-    L.caption = y;  y += 82;
-    L.types = y;    y += 92;
-    L.stats = y;    y += statRowH * 2 + 48;
-    L.cal = y;      y += cm.h + 52;
-    L.footer = y;
-    const H = y + 90;
 
     const ctx = new DrawContext();
     ctx.size = new Size(W, H);
@@ -1319,9 +1339,9 @@ const PosterPainter = {
     );
 
     // ---- 本月总条数（原来这里是占比圆环，去掉后留一个大数字做视觉锚点） ----
-    ctx.setFont(Font.heavySystemFont(130));
+    ctx.setFont(Font.heavySystemFont(116));
     ctx.setTextColor(primary);
-    ctx.drawTextInRect(String(r.total), new Rect(padX, L.total, innerW, 150));
+    ctx.drawTextInRect(String(r.total), new Rect(padX, L.total, innerW, 130));
 
     ctx.setFont(Font.mediumSystemFont(30));
     ctx.setTextColor(secondary);
@@ -1342,17 +1362,17 @@ const PosterPainter = {
       ctx.drawTextInRect(String(r.counts[tp]), new Rect(cx, L.types + 46, typeW, 42));
     });
 
-    // ---- 关键指标 2x2 ----
+    // ---- 关键指标：一行 4 列（原来是 2x2，压成一行给日历腾纵向空间） ----
     const cells = [
       ["打卡率", `${r.activeRate}%`, `${r.activeDays}/${r.elapsedDays} 天`],
       ["最长连击", `${r.streak.days} 天`, r.streak.days > 0 ? "连续收到" : "还没连上"],
       ["单日最高", r.peakDay ? `${r.peakDay.total} 条` : "—", r.peakDay ? r.peakDay.key.slice(5) : "暂无"],
-      ["日均", `${r.dayAvg}`, r.rank ? `月度第 ${r.rank}/${r.monthsWithData}` : "暂无排名"],
+      ["日均", `${r.dayAvg}`, r.rank ? `第 ${r.rank}/${r.monthsWithData} 名` : "暂无排名"],
     ];
-    const cellW = innerW / 2;
+    const cellW = innerW / 4;
     cells.forEach((c, i) => {
-      const cx = padX + (i % 2) * cellW;
-      const cy = L.stats + Math.floor(i / 2) * statRowH;
+      const cx = padX + i * cellW;
+      const cy = L.stats;
       ctx.setFont(Font.mediumSystemFont(26));
       ctx.setTextColor(new Color(t.secondaryLight, 0.9));
       ctx.drawTextInRect(c[0], new Rect(cx, cy, cellW, 34));

@@ -299,20 +299,44 @@ function assertEq(actual, expected, msg) {
   assertEq(dm.cellW, CW, "格宽取 DETAIL_CELL_W");
   assertEq(dm.w, CW * 7 + 8 * 6, "默认明细日历宽度");
   assertEq(dm.h, dm.headerH + 5 * CH + 4 * 8, "默认明细日历高度（星期行 + 5 行格子 + 行距）");
+
+  // 格子必须是 3:4 竖版，手机竖拍的照片贴上去才不变形
+  assertEq(CH / CW, 4 / 3, "明细格为 3:4 竖版");
+  assertEq(HeatmapPainter.detailCellH(300), 400, "detailCellH 按 3:4 推算格高");
+  assertEq(HeatmapPainter.detailCellH(CW), CH, "detailCellH 对默认格宽自洽");
+  // 星期行按格宽算，不能跟着拉长的格高走
+  assert(dm.headerH < CW, `星期标签行不随格高膨胀（${dm.headerH} < ${CW}）`);
+
   // 海报按日历版心反推格宽，必须刚好塞得下
   const calInner = PosterPainter.W - PosterPainter.calPad * 2;
   const posterCellW = Math.floor((calInner - 6 * 8) / 7);
-  const pm = HeatmapPainter.detailMetrics(2020, 3, { cellW: posterCellW, cellH: CH, gap: 8, pad: 0 });
+  const pm = HeatmapPainter.detailMetrics(2020, 3, {
+    cellW: posterCellW, cellH: HeatmapPainter.detailCellH(posterCellW), gap: 8, pad: 0,
+  });
   assert(pm.w <= calInner, `明细日历不超出海报版心（${pm.w} <= ${calInner}）`);
   assert(
     posterCellW >= CW,
     `海报格宽不小于默认值，日历是可视化主体（${posterCellW} >= ${CW}）`
   );
   // 每日照片按 2 倍格子尺寸存盘，比例必须和格子一致，否则贴上去会变形或留黑边
-  assertEq(
-    (CW * 2) / (CH * 2),
-    CW / CH,
-    "每日照片裁切比例与日历格一致"
+  assertEq((CW * 2) / (CH * 2), CW / CH, "每日照片裁切比例与日历格一致");
+
+  console.log("== 海报版面比例 ==");
+  // 3:4 的格子很吃纵向，每个月份的行数都要验，6 行月是最坏情况
+  for (const [y2, m2, rowsExp] of [[2020, 3, 5], [2020, 5, 6], [2020, 2, 5], [2021, 1, 6]]) {
+    const rr = Stats.monthReport(sm, y2, m2);
+    const met = PosterPainter.metrics(rr);
+    const ratio = met.H / met.W;
+    assertEq(met.cm.rows, rowsExp, `${y2}-${m2} 为 ${rowsExp} 行`);
+    assert(
+      ratio <= PosterPainter.MAX_RATIO,
+      `${y2}-${m2} 海报不超 9:16（${met.W}x${met.H}，比例 1:${ratio.toFixed(3)} <= 1:${PosterPainter.MAX_RATIO.toFixed(3)}）`
+    );
+  }
+  const met3 = PosterPainter.metrics(Stats.monthReport(sm, 2020, 3));
+  assert(
+    met3.cm.h / met3.H > 0.5,
+    `日历占海报一半以上高度，是视觉主体（${(met3.cm.h / met3.H * 100).toFixed(0)}%）`
   );
   assertEq(HeatmapPainter.levelHex(0, [2, 4, 7]), null, "0 条没有档位色");
   assertEq(

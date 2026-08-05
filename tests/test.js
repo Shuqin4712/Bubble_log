@@ -62,11 +62,11 @@ const source = fs
 
 const loadModule = new Function(
   source +
-    "\n;return { CONFIG, Store, Stats, HeatmapPainter, ReportText, dateKey, todayKey," +
+    "\n;return { CONFIG, Store, Stats, HeatmapPainter, PosterPainter, dateKey, todayKey," +
     " isValidDateKey, keyToDate, daysBetween, mixHex };"
 );
 const {
-  CONFIG, Store, Stats, HeatmapPainter, ReportText,
+  CONFIG, Store, Stats, HeatmapPainter, PosterPainter,
   dateKey, todayKey, isValidDateKey, keyToDate, daysBetween, mixHex,
 } = loadModule();
 
@@ -280,18 +280,6 @@ function assertEq(actual, expected, msg) {
   assert(rCur.isCurrent === true, "当月被识别为进行中");
   assertEq(rCur.elapsedDays, nowM.getDate(), "当月按已过天数计算，月初不会被稀释");
 
-  console.log("== 月报文案 ==");
-  const lines = ReportText.compose(sm, r);
-  assert(Array.isArray(lines) && lines.length > 0, "文案生成为非空数组");
-  assert(lines[0].includes("18"), "首句包含本月总条数");
-  assert(lines.some((l) => l.includes("80%")), "文案提到环比");
-  assert(lines.some((l) => l.includes("3 天")), "文案提到最长连击");
-  assert(lines.some((l) => l.includes("3月20日")), "文案提到峰值日");
-  assert(lines.some((l) => l.includes("语音")), "文案提到类型偏好");
-  const emptyLines = ReportText.compose(sm, Stats.monthReport(sm, 2020, 5));
-  assert(emptyLines.length > 0, "空月份也有兜底文案");
-  assert(!emptyLines.some((l) => l.includes("NaN")), "空月份文案无 NaN");
-
   console.log("== 月历排版尺寸 ==");
   // 2020-03-01 是周日，31 天 → 5 行
   const hm = HeatmapPainter.monthMetrics(2020, 3, {});
@@ -302,6 +290,29 @@ function assertEq(actual, expected, msg) {
   const hmNoFooter = HeatmapPainter.monthMetrics(2020, 3, { showFooter: false });
   assertEq(hmNoFooter.h, 247, "关掉页脚少 34pt");
   assertEq(mixHex("#000000", "#ffffff", 0.5), "#808080", "渐变插值取中间色");
+
+  console.log("== 四类明细大日历 ==");
+  const dm = HeatmapPainter.detailMetrics(2020, 3, {});
+  assertEq(dm.rows, 5, "明细日历行数与紧凑版一致");
+  assertEq(dm.w, 930, "默认明细日历宽度（126x7 + 8x6）");
+  assertEq(dm.h, 44 + 5 * 100 + 4 * 8, "默认明细日历高度（星期行 + 5 行格子 + 行距）");
+  // 海报按内容宽度反推格宽，必须刚好塞进 1080-72*2 的版心
+  const posterCellW = Math.floor((PosterPainter.W - PosterPainter.padX * 2 - 6 * 8) / 7);
+  const pm = HeatmapPainter.detailMetrics(2020, 3, { cellW: posterCellW, cellH: 100, gap: 8, pad: 0 });
+  assert(
+    pm.w <= PosterPainter.W - PosterPainter.padX * 2,
+    `明细日历不超出海报版心（${pm.w} <= ${PosterPainter.W - PosterPainter.padX * 2}）`
+  );
+  assertEq(HeatmapPainter.levelHex(0, [2, 4, 7]), null, "0 条没有档位色");
+  assertEq(
+    HeatmapPainter.levelHex(99, [2, 4, 7]),
+    CONFIG.theme[CONFIG.themeName].heatLevels[3],
+    "高档取色阶最深一档"
+  );
+  // 6 行的月份（2020-05：5/1 是周五，31 天 → 6 行）要能撑开高度
+  const dm6 = HeatmapPainter.detailMetrics(2020, 5, {});
+  assertEq(dm6.rows, 6, "2020 年 5 月为 6 行");
+  assertEq(dm6.h, 44 + 6 * 100 + 5 * 8, "6 行月份高度正确");
 
   console.log("== 备份与损坏恢复 ==");
   // 上面多次 save 已产生备份；现在写坏主文件

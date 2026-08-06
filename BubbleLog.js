@@ -1012,6 +1012,14 @@ Object.assign(HeatmapPainter, {
     return Math.round((cellW * this.DETAIL_CELL_H) / this.DETAIL_CELL_W);
   },
 
+  /**
+   * 星期标签字号。和 detailMetrics 里的 headerH 同为格「宽」的函数——
+   * 两者必须同源，否则 3:4 拉长后字会比标签行还高、压到第一行格子上。
+   */
+  weekdayFont(cellW) {
+    return Math.round(cellW * 0.22);
+  },
+
   /** 条数 → 该档的色阶 hex（0 条返回 null），明细格要在此基础上调淡 */
   levelHex(count, bounds) {
     const i = this.levelIndex(count, bounds);
@@ -1062,22 +1070,23 @@ Object.assign(HeatmapPainter, {
     const labelColor = new Color(dark ? t.secondaryDark : t.secondaryLight);
     const textColor = new Color(dark ? t.secondaryDark : t.secondaryLight);
     const emptyFill = new Color(dark ? t.heatBaseDark : t.heatBase);
-    const corner = Math.round(Math.min(cellW, cellH) * 0.16);
+    // 全直角：DrawContext 没有裁剪路径 API，照片只能画成直角，
+    // 圆角空格子和直角照片格混在一起看着更别扭，索性统一直角
 
     const ctx = new DrawContext();
     ctx.size = new Size(w, h);
     ctx.opaque = false;
     ctx.respectScreenScale = !!opts.respectScreenScale;
 
-    // 星期标签
+    // 星期标签。字号和 headerH 都按格「宽」算——两者必须同源，
+    // 之前字号按格高、行高按格宽，3:4 拉长后字比行还高，直接压到第一行格子上
+    const weekdayFont = this.weekdayFont(cellW);
+    const weekdayH = Math.min(weekdayFont + 6, headerH - 8); // 和格子之间留 8pt 呼吸
     ctx.setTextAlignedCenter();
-    ctx.setFont(Font.mediumSystemFont(Math.round(cellH * 0.26)));
+    ctx.setFont(Font.mediumSystemFont(weekdayFont));
     ctx.setTextColor(labelColor);
     ["日", "一", "二", "三", "四", "五", "六"].forEach((wd, i) => {
-      ctx.drawTextInRect(
-        wd,
-        new Rect(pad + i * (cellW + gap), pad, cellW, headerH - Math.round(cellH * 0.06))
-      );
+      ctx.drawTextInRect(wd, new Rect(pad + i * (cellW + gap), pad, cellW, weekdayH));
     });
 
     // 格内字号一律按格「宽」算：横向才是紧的那一维（一行要塞下两组 emoji+数字），
@@ -1099,18 +1108,14 @@ Object.assign(HeatmapPainter, {
 
       // 底色：把档位色往背景色调淡，保证四组数字读得清
       const hex = this.levelHex(total, bounds);
-      const path = new Path();
-      path.addRoundedRect(new Rect(x, y, cellW, cellH), corner, corner);
-      ctx.addPath(path);
       ctx.setFillColor(
         hex === null
           ? emptyFill
           : new Color(mixHex(hex, dark ? t.bgBottomDark : "#FFFFFF", dark ? 0.55 : 0.55))
       );
-      ctx.fillPath();
+      ctx.fillRect(new Rect(x, y, cellW, cellH));
 
-      // 当天照片做底图。DrawContext 没有裁剪路径 API，照片只能画成直角，
-      // 所以明细格的圆角本来就取得很小（16%），直角照片压上去不明显。
+      // 当天照片做底图，和空格子一样是直角，边缘严丝合缝
       if (photo) {
         ctx.drawImageInRect(photo, new Rect(x, y, cellW, cellH));
         // 暗色蒙版：白字要在任意照片上都读得清，这层不能省
@@ -1119,12 +1124,9 @@ Object.assign(HeatmapPainter, {
       }
 
       if (key === tKey) {
-        const ring = new Path();
-        ring.addRoundedRect(new Rect(x + 1, y + 1, cellW - 2, cellH - 2), corner - 1, corner - 1);
-        ctx.addPath(ring);
         ctx.setStrokeColor(new Color(dark ? t.heatTodayDark : t.heatToday));
         ctx.setLineWidth(3);
-        ctx.strokePath();
+        ctx.strokeRect(new Rect(x + 2, y + 2, cellW - 4, cellH - 4));
       }
 
       // 左上角日期

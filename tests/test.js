@@ -306,6 +306,16 @@ function assertEq(actual, expected, msg) {
   assertEq(HeatmapPainter.detailCellH(CW), CH, "detailCellH 对默认格宽自洽");
   // 星期行按格宽算，不能跟着拉长的格高走
   assert(dm.headerH < CW, `星期标签行不随格高膨胀（${dm.headerH} < ${CW}）`);
+  // 回归：星期字号曾按格高算、行高按格宽算，3:4 拉长后字比行还高，压到第一行格子上
+  for (const w of [90, 120, CW, 160, 200]) {
+    const met = HeatmapPainter.detailMetrics(2020, 3, { cellW: w });
+    const font = HeatmapPainter.weekdayFont(w);
+    // 标签矩形是 min(font+6, headerH-8)，所以真正的不变量是字号本身放得下
+    assert(
+      font <= met.headerH - 8,
+      `格宽 ${w}：星期字号放得进标签行且与格子留 8pt（${font} <= ${met.headerH}-8）`
+    );
+  }
 
   // 海报按日历版心反推格宽，必须刚好塞得下
   const calInner = PosterPainter.W - PosterPainter.calPad * 2;

@@ -65,8 +65,10 @@ iCloud Drive/Scriptable/bubblelog/
 ## 开发
 
 - 单文件架构：`BubbleLog.js` 内部分区为 CONFIG / 日期工具 / Store / Stats / HeatmapPainter（含四类明细大日历）/ RingPainter / PosterPainter / WidgetView / ReportView / PanelView / main
-- 两套日历渲染分工：`paintMonth` 每格一个总数（36pt 格子，面板日常看）；`paintMonthDetail` 每格四类明细 + 可选照片底图（153x204 的 3:4 竖格，月报全屏图和海报用）
+- 两套日历渲染分工：`paintMonth` 每格一个总数（36pt 格子，面板日常看）；`paintMonthDetail` 每格四类明细 + 可选照片底图（153x204 的 3:4 竖格，直角，月报全屏图和海报用）
 - 每日照片按 `DETAIL_CELL_W/H` 的 2 倍裁切存盘。改格子尺寸要同步改这两个常量，否则旧照片比例对不上
+- 明细日历用直角：DrawContext 没有裁剪路径 API，照片贴进圆角矩形做不到，圆角空格子和直角照片格混排更扎眼。紧凑日历和桌面组件仍是圆角
+- 明细日历里凡是随格子尺寸缩放的字号，一律按格「宽」算。3:4 竖格下按格高算会让字比它所在的行还高，直接压到相邻元素上
 - 海报版面高度受 9:16 约束（`PosterPainter.MAX_RATIO`）。3:4 的日历格很吃纵向，6 行的月份只剩约 2% 余量——版面加内容前先跑测试，`PosterPainter.metrics()` 不碰 DrawContext，可直接断言比例
 - 数据层测试（Node 环境，mock 掉 Scriptable API）：
 

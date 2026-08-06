@@ -1282,14 +1282,17 @@ const PosterPainter = {
     const statRowH = 130;
 
     // 自上而下堆版面，边堆边记录每块的 y。
-    // 四个指标从 2x2 改成一行 4 列、各段间距收紧，为拉长的日历腾出纵向空间
+    // 四个指标从 2x2 改成一行 4 列、各段间距收紧，为拉长的日历腾出纵向空间。
+    //
+    // 这里刻意不放「四类横排」（💬412 🎙38 …）：它和下面的指标行同为
+    // 「图标/标签 + 数字」的网格，紧挨着会被当成同一组读，产生歧义。
+    // 四类明细在日历里每天都有，月度合计放海报上也是冗余的。
     let y = 64;
     const L = {};
     L.title = y;    y += 66;
     L.sub = y;      y += 74;
     L.total = y;    y += 138;
-    L.caption = y;  y += 66;
-    L.types = y;    y += 84;
+    L.caption = y;  y += 96; // 比其余间距宽，把说明文字和指标行拉开
     L.stats = y;    y += statRowH + 44;
     L.cal = y;      y += cm.h + 40;
     L.footer = y;
@@ -1351,18 +1354,6 @@ const PosterPainter = {
       ? "首月，还没有环比"
       : `环比上月 ${r.momPct > 0 ? "+" : ""}${r.momPct}%`;
     ctx.drawTextInRect(`${r.month} 月泡泡 · ${momText}`, new Rect(padX, L.caption, innerW, 42));
-
-    // ---- 四类横排 ----
-    const typeW = innerW / 4;
-    CONFIG.types.forEach((tp, i) => {
-      const cx = padX + i * typeW;
-      ctx.setFont(Font.mediumSystemFont(38));
-      ctx.setTextColor(new Color(t.heatLevels[i]));
-      ctx.drawTextInRect(CONFIG.typeMeta[tp].emoji, new Rect(cx, L.types, typeW, 46));
-      ctx.setFont(Font.semiboldSystemFont(34));
-      ctx.setTextColor(secondary);
-      ctx.drawTextInRect(String(r.counts[tp]), new Rect(cx, L.types + 46, typeW, 42));
-    });
 
     // ---- 关键指标：一行 4 列（原来是 2x2，压成一行给日历腾纵向空间） ----
     const cells = [
